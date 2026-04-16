@@ -4,6 +4,9 @@ import nodemailer from "nodemailer";
 import { supabase } from "@/lib/supabase";
 import { getLatestVideos } from "@/lib/youtube";
 
+export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
+
 type ServiceStatus = "ok" | "error";
 type OverallStatus = "healthy" | "partial" | "failed";
 

@@ -2,6 +2,9 @@ import { NextResponse } from "next/server";
 import { getLatestVideos, getVideoTranscript } from "@/lib/youtube";
 import { saveVideo, supabase } from "@/lib/supabase";
 
+export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
+
 interface NewVideoResult {
   video_id: string;
   title: string;

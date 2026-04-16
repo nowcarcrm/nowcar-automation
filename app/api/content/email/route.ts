@@ -2,6 +2,9 @@ import { NextResponse } from "next/server";
 import { sendContentEmail, type EmailContentItem } from "@/lib/mailer";
 import { markContentEmailSent, supabase, type ChannelType } from "@/lib/supabase";
 
+export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
+
 interface PendingContentRow {
   id: string;
   video_id: string;

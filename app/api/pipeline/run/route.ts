@@ -5,6 +5,7 @@ import { runEmailStep } from "@/lib/pipeline/email";
 
 export const maxDuration = 300;
 export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
 
 type StepStatus = "ok" | "skipped" | "error";
 

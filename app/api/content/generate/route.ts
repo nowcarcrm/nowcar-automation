@@ -10,6 +10,9 @@ import {
   type ChannelType,
 } from "@/lib/supabase";
 
+export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
+
 type ChannelResult = {
   success: boolean;
   length: number;
