@@ -142,3 +142,29 @@ export async function markContentEmailSent(contentId: string): Promise<void> {
     throw new Error(`[supabase] 이메일 발송 상태 업데이트 실패: ${error.message}`);
   }
 }
+
+export async function getPendingTistoryContents(): Promise<GeneratedContent[]> {
+  const { data, error } = await supabase
+    .from("generated_contents")
+    .select("*")
+    .eq("channel_type", "tistory")
+    .eq("status", "pending")
+    .order("created_at", { ascending: true });
+
+  if (error) {
+    throw new Error(`[supabase] 티스토리 대기 콘텐츠 조회 실패: ${error.message}`);
+  }
+
+  return (data ?? []) as GeneratedContent[];
+}
+
+export async function markContentPublished(contentId: string): Promise<void> {
+  const { error } = await supabase
+    .from("generated_contents")
+    .update({ status: "published", published_at: new Date().toISOString() })
+    .eq("id", contentId);
+
+  if (error) {
+    throw new Error(`[supabase] 발행 완료 상태 업데이트 실패: ${error.message}`);
+  }
+}

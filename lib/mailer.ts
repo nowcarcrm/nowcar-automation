@@ -1,5 +1,6 @@
 import nodemailer from "nodemailer";
-import type { ChannelType } from "./supabase";
+import { marked } from "marked";
+import type { ChannelType, GeneratedContent } from "./supabase";
 
 export interface EmailContentItem {
   id?: string;
@@ -20,6 +21,8 @@ function requireEnv(name: string): string {
 
 const emailUser = requireEnv("EMAIL_USER");
 const emailPass = requireEnv("EMAIL_PASS");
+const tistoryEmail = process.env.TISTORY_EMAIL ?? "";
+const autoPublishTistory = process.env.AUTO_PUBLISH_TISTORY === "true";
 
 // Gmail SMTP 전송기
 const transporter = nodemailer.createTransport({
@@ -178,5 +181,40 @@ export async function sendContentEmail(
   } catch (error) {
     const message = error instanceof Error ? error.message : "알 수 없는 오류";
     throw new Error(`[mailer] 이메일 발송 실패: ${message}`);
+  }
+}
+
+export async function sendToTistory(content: GeneratedContent): Promise<void> {
+  if (!autoPublishTistory) {
+    throw new Error(
+      "[mailer] AUTO_PUBLISH_TISTORY가 true가 아니어서 티스토리 발행을 건너뜁니다.",
+    );
+  }
+
+  if (!tistoryEmail) {
+    throw new Error("[mailer] TISTORY_EMAIL 환경변수가 설정되지 않았습니다.");
+  }
+
+  const subject = content.title?.trim() || "나우카 티스토리 자동 발행 콘텐츠";
+  const htmlBody = marked.parse(content.body) as string;
+
+  const html = `
+    <div style="max-width:900px;margin:0 auto;padding:16px;font-family:'Malgun Gothic','Apple SD Gothic Neo',Arial,sans-serif;">
+      <h1 style="font-size:22px;margin-bottom:8px;">${escapeHtml(subject)}</h1>
+      <hr style="border:none;border-top:1px solid #e5e7eb;margin:12px 0;" />
+      <div>${htmlBody}</div>
+    </div>
+  `;
+
+  try {
+    await transporter.sendMail({
+      from: `"Nowcar Auto" <${emailUser}>`,
+      to: tistoryEmail,
+      subject,
+      html,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "알 수 없는 오류";
+    throw new Error(`[mailer] 티스토리 이메일 발송 실패: ${message}`);
   }
 }

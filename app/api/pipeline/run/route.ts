@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { runDetectStep } from "@/lib/pipeline/detect";
 import { runGenerateStep } from "@/lib/pipeline/generate";
 import { runEmailStep } from "@/lib/pipeline/email";
+import { sendToTistory } from "@/lib/mailer";
+import { getPendingTistoryContents, markContentPublished } from "@/lib/supabase";
 
 export const maxDuration = 300;
 export const dynamic = "force-dynamic";
@@ -27,6 +29,8 @@ interface EmailStepResult {
   status: StepStatus;
   emails_sent_count: number;
   emails_failed_count: number;
+  tistory_published_count: number;
+  tistory_failed_count: number;
   duration_seconds: number;
 }
 
@@ -79,6 +83,8 @@ export async function GET(request: NextRequest) {
     status: "skipped",
     emails_sent_count: 0,
     emails_failed_count: 0,
+    tistory_published_count: 0,
+    tistory_failed_count: 0,
     duration_seconds: 0,
   };
 
@@ -146,6 +152,7 @@ export async function GET(request: NextRequest) {
       step3.duration_seconds = Math.round((Date.now() - step3StartedAt) / 1000);
     } else {
       console.log("[3/3] 📧 이메일 발송 중...");
+      const tistoryCandidates = await getPendingTistoryContents();
       const data = await runEmailStep();
 
       if (!data.has_pending_email) {
@@ -167,6 +174,24 @@ export async function GET(request: NextRequest) {
         console.log(
           `[3/3] ✅ ${step3.emails_sent_count}통 이메일 발송 완료 (소요: ${step3.duration_seconds}s)`,
         );
+      }
+
+      // 티스토리 전용 이메일 발행 (대표님 메일 발송과 독립 처리)
+      if (tistoryCandidates.length > 0) {
+        console.log(`[3/3] 📨 티스토리 이메일 발행 시도: ${tistoryCandidates.length}건`);
+      }
+
+      for (const content of tistoryCandidates) {
+        try {
+          await sendToTistory(content);
+          await markContentPublished(content.id);
+          step3.tistory_published_count += 1;
+        } catch (error) {
+          step3.tistory_failed_count += 1;
+          const message = toErrorMessage(error);
+          errors.push(`[step3_email][tistory:${content.id}] ${message}`);
+          console.error(`[pipeline] 티스토리 발행 실패(${content.id}): ${message}`);
+        }
       }
     }
   } catch (error) {
