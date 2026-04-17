@@ -111,12 +111,40 @@ interface GraphErrorBody {
   };
 }
 
+class GraphApiError extends Error {
+  public readonly status: number;
+  public readonly path: string;
+  public readonly method: "GET" | "POST";
+  public readonly rawBody: string;
+  public readonly parsedBody: unknown;
+  public readonly graphCode?: number;
+
+  constructor(params: {
+    status: number;
+    path: string;
+    method: "GET" | "POST";
+    message: string;
+    rawBody: string;
+    parsedBody: unknown;
+    graphCode?: number;
+  }) {
+    super(params.message);
+    this.name = "GraphApiError";
+    this.status = params.status;
+    this.path = params.path;
+    this.method = params.method;
+    this.rawBody = params.rawBody;
+    this.parsedBody = params.parsedBody;
+    this.graphCode = params.graphCode;
+  }
+}
+
 interface MeAccountsResponse {
   data?: Array<{
     id?: string;
     name?: string;
     access_token?: string;
-    perms?: string[];
+    tasks?: string[];
   }>;
 }
 
@@ -145,7 +173,7 @@ async function getFacebookPageAccessToken(): Promise<string> {
 
   console.log("[meta] 🔍 /me/accounts 로 Page Access Token 자동 조회");
   const accounts = await callGraphApi<MeAccountsResponse>("GET", "/me/accounts", {
-    fields: "id,name,access_token,perms",
+    fields: "name,id,access_token,tasks",
     access_token: userToken,
   });
 
@@ -154,6 +182,16 @@ async function getFacebookPageAccessToken(): Promise<string> {
   if (!pageToken) {
     throw new Error(
       `페이지 토큰을 찾지 못했습니다. FACEBOOK_PAGE_ID(${pageId})가 현재 USER 토큰 계정의 페이지 목록에 없거나 권한이 부족합니다. META_PAGE_ACCESS_TOKEN 환경변수 설정을 권장합니다.`,
+    );
+  }
+
+  // 페이지 게시를 위해 필요한 최소 작업 권한 체크
+  const tasks = matched?.tasks ?? [];
+  const canCreate = tasks.includes("CREATE_CONTENT");
+  const canManage = tasks.includes("MANAGE");
+  if (!canCreate || !canManage) {
+    throw new Error(
+      `페이지 작업 권한 부족: tasks=[${tasks.join(", ")}]. CREATE_CONTENT와 MANAGE가 필요합니다.`,
     );
   }
 
@@ -200,7 +238,15 @@ async function callGraphApi<T>(
 
     // 토큰 만료 / 권한 문제를 한글로 좀 더 명확히 알려주기
     const friendly = normalizeGraphError(message, errBody?.code);
-    throw new Error(friendly);
+    throw new GraphApiError({
+      status: response.status,
+      path,
+      method,
+      message: friendly,
+      rawBody: raw,
+      parsedBody: parsed,
+      graphCode: errBody?.code,
+    });
   }
 
   return parsed as T;
@@ -232,6 +278,8 @@ async function createReelsContainer(
   const accessToken = getMetaAccessToken();
 
   console.log(`[meta] 📦 [1/3] 인스타 Reels 컨테이너 생성 중...`);
+  console.log(`[meta]    - video_url=${videoUrl}`);
+  console.log(`[meta]    - caption_length=${caption.length}`);
 
   const data = await callGraphApi<{ id: string }>(
     "POST",
@@ -248,6 +296,7 @@ async function createReelsContainer(
     throw new Error("컨테이너 ID 를 응답에서 찾을 수 없습니다.");
   }
 
+  console.log(`[meta]    - container_response=${JSON.stringify(data)}`);
   console.log(`[meta] ✅ [1/3] 컨테이너 생성 완료 - id=${data.id}`);
   return data.id;
 }
@@ -257,7 +306,7 @@ async function waitForContainerReady(
   containerId: string,
   opts: { maxWaitMs?: number; intervalMs?: number } = {},
 ): Promise<void> {
-  const maxWaitMs = opts.maxWaitMs ?? 60_000; // 60초
+  const maxWaitMs = opts.maxWaitMs ?? 90_000; // 90초
   const intervalMs = opts.intervalMs ?? 5_000; // 5초
   const accessToken = getMetaAccessToken();
   const start = Date.now();
@@ -275,7 +324,8 @@ async function waitForContainerReady(
     );
 
     const statusCode = data.status_code ?? data.status ?? "UNKNOWN";
-    console.log(`[meta]    - status=${statusCode}`);
+    const elapsedSeconds = Math.round((Date.now() - start) / 1000);
+    console.log(`[meta]    - status=${statusCode}, elapsed=${elapsedSeconds}s`);
 
     if (statusCode === "FINISHED") {
       console.log(`[meta] ✅ [2/3] 컨테이너 준비 완료`);
@@ -316,6 +366,7 @@ async function publishContainer(containerId: string): Promise<string> {
     throw new Error("발행된 미디어 ID 를 응답에서 찾을 수 없습니다.");
   }
 
+  console.log(`[meta]    - publish_response=${JSON.stringify(data)}`);
   console.log(`[meta] ✅ [3/3] 인스타 Reels 발행 완료 - media_id=${data.id}`);
   return data.id;
 }
@@ -339,6 +390,9 @@ export async function publishInstagramReel(
   }
 
   try {
+    console.log(
+      `[meta] 🎯 인스타 발행 요청: video_id=${input.videoId}, storage_path=${input.storagePath ?? "-"}`,
+    );
     const containerId = await createReelsContainer(input.videoUrl, input.caption);
     await waitForContainerReady(containerId);
     const mediaId = await publishContainer(containerId);
@@ -361,6 +415,12 @@ export async function publishInstagramReel(
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.error(`[meta] ❌ 인스타 Reels 발행 실패: ${message}`);
+    if (error instanceof GraphApiError) {
+      console.error(
+        `[meta] ❌ Instagram Graph API 에러 상세: status=${error.status}, method=${error.method}, path=${error.path}, graph_code=${error.graphCode ?? "unknown"}`,
+      );
+      console.error(`[meta] ❌ Instagram Graph raw response: ${error.rawBody}`);
+    }
 
     await recordPublish({
       videoId: input.videoId,
@@ -412,6 +472,9 @@ export async function publishFacebookPagePost(
 
   try {
     const pageAccessToken = await getFacebookPageAccessToken();
+    console.log(
+      `[meta] 🔐 Facebook Page Token 준비 완료 (token_length=${pageAccessToken.length})`,
+    );
     const data = await callGraphApi<{ id: string }>(
       "POST",
       `/${pageId}/feed`,
