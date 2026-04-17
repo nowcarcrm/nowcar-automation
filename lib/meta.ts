@@ -78,6 +78,16 @@ function getFacebookPageId(): string {
   return requireEnv("FACEBOOK_PAGE_ID");
 }
 
+/**
+ * 선택 환경변수:
+ * - 설정되어 있으면 가장 안정적인 고정 Page Token으로 사용
+ * - 없으면 USER 토큰으로 /me/accounts 조회하여 동적으로 추출
+ */
+function getOptionalFacebookPageAccessToken(): string | null {
+  const value = process.env.META_PAGE_ACCESS_TOKEN?.trim();
+  return value && value.length > 0 ? value : null;
+}
+
 /** 자동 발행 ON/OFF 스위치 */
 export function isInstagramAutoPublishEnabled(): boolean {
   return process.env.AUTO_PUBLISH_INSTAGRAM === "true";
@@ -99,6 +109,59 @@ interface GraphErrorBody {
     error_subcode?: number;
     fbtrace_id?: string;
   };
+}
+
+interface MeAccountsResponse {
+  data?: Array<{
+    id?: string;
+    name?: string;
+    access_token?: string;
+    perms?: string[];
+  }>;
+}
+
+/**
+ * 페이스북 페이지 발행용 토큰을 구한다.
+ *
+ * 우선순위:
+ * 1) META_PAGE_ACCESS_TOKEN (권장)
+ * 2) USER 토큰으로 /me/accounts 조회 후 해당 PAGE_ID 의 access_token 추출
+ */
+let cachedPageAccessToken: string | null = null;
+async function getFacebookPageAccessToken(): Promise<string> {
+  if (cachedPageAccessToken) {
+    return cachedPageAccessToken;
+  }
+
+  const fromEnv = getOptionalFacebookPageAccessToken();
+  if (fromEnv) {
+    console.log("[meta] 🔐 META_PAGE_ACCESS_TOKEN 사용");
+    cachedPageAccessToken = fromEnv;
+    return fromEnv;
+  }
+
+  const pageId = getFacebookPageId();
+  const userToken = getMetaAccessToken();
+
+  console.log("[meta] 🔍 /me/accounts 로 Page Access Token 자동 조회");
+  const accounts = await callGraphApi<MeAccountsResponse>("GET", "/me/accounts", {
+    fields: "id,name,access_token,perms",
+    access_token: userToken,
+  });
+
+  const matched = (accounts.data ?? []).find((page) => page.id === pageId);
+  const pageToken = matched?.access_token;
+  if (!pageToken) {
+    throw new Error(
+      `페이지 토큰을 찾지 못했습니다. FACEBOOK_PAGE_ID(${pageId})가 현재 USER 토큰 계정의 페이지 목록에 없거나 권한이 부족합니다. META_PAGE_ACCESS_TOKEN 환경변수 설정을 권장합니다.`,
+    );
+  }
+
+  console.log(
+    `[meta] ✅ 페이지 토큰 자동 조회 성공: ${matched?.name ?? "unknown"} (${pageId})`,
+  );
+  cachedPageAccessToken = pageToken;
+  return pageToken;
 }
 
 async function callGraphApi<T>(
@@ -344,17 +407,17 @@ export async function publishFacebookPagePost(
   }
 
   const pageId = getFacebookPageId();
-  const accessToken = getMetaAccessToken();
 
   console.log(`[meta] 📘 페이스북 페이지 게시 시도 - page_id=${pageId}`);
 
   try {
+    const pageAccessToken = await getFacebookPageAccessToken();
     const data = await callGraphApi<{ id: string }>(
       "POST",
       `/${pageId}/feed`,
       {
         message: input.message,
-        access_token: accessToken,
+        access_token: pageAccessToken,
       },
     );
 
