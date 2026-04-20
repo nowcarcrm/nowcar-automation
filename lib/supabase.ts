@@ -15,6 +15,7 @@ export interface YouTubeVideo {
   transcript: string | null;
   thumbnail_url: string | null;
   video_url: string | null;
+  storage_path: string | null;
   published_at: string | null;
   processed: boolean;
   created_at: string;

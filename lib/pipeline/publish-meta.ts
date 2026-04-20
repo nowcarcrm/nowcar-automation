@@ -1,4 +1,4 @@
-import { createAdminClient, downloadAndUploadShort } from "@/lib/storage";
+import { createAdminClient, TEMP_VIDEOS_BUCKET } from "@/lib/storage";
 import {
   buildInstagramCaption,
   isFacebookAutoPublishEnabled,
@@ -52,6 +52,7 @@ type VideoRow = {
   video_id: string;
   title: string;
   video_url: string | null;
+  storage_path: string | null;
 };
 
 type ContentRow = {
@@ -96,7 +97,7 @@ export async function runPublishMetaStep(): Promise<PublishMetaResult> {
   // 1) 대상 영상 조회
   const { data: videos, error: videosError } = await supabase
     .from("youtube_videos")
-    .select("id, video_id, title, video_url")
+    .select("id, video_id, title, video_url, storage_path")
     .eq("processed", true)
     .order("created_at", { ascending: false })
     .limit(MAX_VIDEOS_PER_RUN);
@@ -187,9 +188,25 @@ export async function runPublishMetaStep(): Promise<PublishMetaResult> {
         result.instagram_skipped_count += 1;
       } else {
         try {
-          // 1) 유튜브 → Supabase Storage 업로드
-          const uploaded = await downloadAndUploadShort(video.video_id);
-          storagePath = uploaded.path;
+          const storagePathFromDb = video.storage_path;
+          if (!storagePathFromDb) {
+            console.warn(
+              `[publish-meta] ⏭  instagram skip: video_id=${video.video_id}, reason=storage_path not set by local worker`,
+            );
+            result.instagram_skipped_count += 1;
+            continue;
+          }
+          storagePath = storagePathFromDb;
+
+          const { data: publicUrlData } = supabase.storage
+            .from(TEMP_VIDEOS_BUCKET)
+            .getPublicUrl(storagePathFromDb);
+          const publicUrl = publicUrlData?.publicUrl;
+          if (!publicUrl) {
+            throw new Error(
+              `스토리지 공개 URL 생성 실패(video_id=${video.video_id}, path=${storagePathFromDb})`,
+            );
+          }
 
           // 2) 캡션 조립
           const caption = buildInstagramCaption(
@@ -200,9 +217,9 @@ export async function runPublishMetaStep(): Promise<PublishMetaResult> {
           // 3) 실제 발행
           const publishResult = await publishInstagramReel({
             videoId: video.video_id,
-            videoUrl: uploaded.publicUrl,
+            videoUrl: publicUrl,
             caption,
-            storagePath: uploaded.path,
+            storagePath: storagePathFromDb,
           });
 
           if (publishResult.success) {
