@@ -19,8 +19,8 @@ import { createAdminClient } from "./storage";
  * ============================================================
  */
 
-/** Graph API 버전 (2026년 기준 안정 버전) */
-const GRAPH_API_VERSION = "v21.0";
+/** Graph API 버전 (Page Token 직접 사용 기준) */
+const GRAPH_API_VERSION = "v25.0";
 const GRAPH_BASE_URL = `https://graph.facebook.com/${GRAPH_API_VERSION}`;
 
 /* ------------------------------------------------------------
@@ -78,14 +78,8 @@ function getFacebookPageId(): string {
   return requireEnv("FACEBOOK_PAGE_ID");
 }
 
-/**
- * 선택 환경변수:
- * - 설정되어 있으면 가장 안정적인 고정 Page Token으로 사용
- * - 없으면 USER 토큰으로 /me/accounts 조회하여 동적으로 추출
- */
-function getOptionalFacebookPageAccessToken(): string | null {
-  const value = process.env.META_PAGE_ACCESS_TOKEN?.trim();
-  return value && value.length > 0 ? value : null;
+function getFacebookPageAccessToken(): string {
+  return getMetaAccessToken();
 }
 
 /** 자동 발행 ON/OFF 스위치 */
@@ -156,68 +150,6 @@ class GraphApiError extends Error {
     this.parsedBody = params.parsedBody;
     this.graphCode = params.graphCode;
   }
-}
-
-interface MeAccountsResponse {
-  data?: Array<{
-    id?: string;
-    name?: string;
-    access_token?: string;
-    tasks?: string[];
-  }>;
-}
-
-/**
- * 페이스북 페이지 발행용 토큰을 구한다.
- *
- * 우선순위:
- * 1) META_PAGE_ACCESS_TOKEN (권장)
- * 2) USER 토큰으로 /me/accounts 조회 후 해당 PAGE_ID 의 access_token 추출
- */
-let cachedPageAccessToken: string | null = null;
-async function getFacebookPageAccessToken(): Promise<string> {
-  if (cachedPageAccessToken) {
-    return cachedPageAccessToken;
-  }
-
-  const fromEnv = getOptionalFacebookPageAccessToken();
-  if (fromEnv) {
-    console.log("[meta] 🔐 META_PAGE_ACCESS_TOKEN 사용");
-    cachedPageAccessToken = fromEnv;
-    return fromEnv;
-  }
-
-  const pageId = getFacebookPageId();
-  const userToken = getMetaAccessToken();
-
-  console.log("[meta] 🔍 /me/accounts 로 Page Access Token 자동 조회");
-  const accounts = await callGraphApi<MeAccountsResponse>("GET", "/me/accounts", {
-    fields: "name,id,access_token,tasks",
-    access_token: userToken,
-  });
-
-  const matched = (accounts.data ?? []).find((page) => page.id === pageId);
-  const pageToken = matched?.access_token;
-  if (!pageToken) {
-    throw new Error(
-      `페이지 토큰을 찾지 못했습니다. FACEBOOK_PAGE_ID(${pageId})가 현재 USER 토큰 계정의 페이지 목록에 없거나 권한이 부족합니다. META_PAGE_ACCESS_TOKEN 환경변수 설정을 권장합니다.`,
-    );
-  }
-
-  // 페이지 게시를 위해 필요한 최소 작업 권한 체크
-  const tasks = matched?.tasks ?? [];
-  const canCreate = tasks.includes("CREATE_CONTENT");
-  if (!canCreate) {
-    throw new Error(
-      `페이지 작업 권한 부족: tasks=[${tasks.join(", ")}]. CREATE_CONTENT가 필요합니다.`,
-    );
-  }
-
-  console.log(
-    `[meta] ✅ 페이지 토큰 자동 조회 성공: ${matched?.name ?? "unknown"} (${pageId})`,
-  );
-  cachedPageAccessToken = pageToken;
-  return pageToken;
 }
 
 async function callGraphApi<T>(
@@ -500,7 +432,7 @@ export async function publishFacebookPagePost(
   console.log(`[meta] 📘 페이스북 페이지 게시 시도 - page_id=${pageId}`);
 
   try {
-    const pageAccessToken = await getFacebookPageAccessToken();
+    const pageAccessToken = getFacebookPageAccessToken();
     console.log(
       `[meta] 🔐 Facebook Page Token 준비 완료 (token_length=${pageAccessToken.length})`,
     );
