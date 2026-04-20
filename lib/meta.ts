@@ -111,6 +111,25 @@ interface GraphErrorBody {
   };
 }
 
+function serializeUnknownError(error: unknown): string {
+  if (error instanceof Error) {
+    return JSON.stringify(
+      {
+        name: error.name,
+        message: error.message,
+        stack: error.stack,
+      },
+      null,
+      2,
+    );
+  }
+  try {
+    return JSON.stringify(error, null, 2);
+  } catch {
+    return String(error);
+  }
+}
+
 class GraphApiError extends Error {
   public readonly status: number;
   public readonly path: string;
@@ -188,10 +207,9 @@ async function getFacebookPageAccessToken(): Promise<string> {
   // 페이지 게시를 위해 필요한 최소 작업 권한 체크
   const tasks = matched?.tasks ?? [];
   const canCreate = tasks.includes("CREATE_CONTENT");
-  const canManage = tasks.includes("MANAGE");
-  if (!canCreate || !canManage) {
+  if (!canCreate) {
     throw new Error(
-      `페이지 작업 권한 부족: tasks=[${tasks.join(", ")}]. CREATE_CONTENT와 MANAGE가 필요합니다.`,
+      `페이지 작업 권한 부족: tasks=[${tasks.join(", ")}]. CREATE_CONTENT가 필요합니다.`,
     );
   }
 
@@ -278,6 +296,7 @@ async function createReelsContainer(
   const accessToken = getMetaAccessToken();
 
   console.log(`[meta] 📦 [1/3] 인스타 Reels 컨테이너 생성 중...`);
+  console.log(`[meta]    - endpoint=/${igUserId}/media`);
   console.log(`[meta]    - video_url=${videoUrl}`);
   console.log(`[meta]    - caption_length=${caption.length}`);
 
@@ -310,10 +329,13 @@ async function waitForContainerReady(
   const intervalMs = opts.intervalMs ?? 5_000; // 5초
   const accessToken = getMetaAccessToken();
   const start = Date.now();
+  let pollCount = 0;
 
   console.log(`[meta] ⏳ [2/3] 컨테이너 상태 폴링 시작 (최대 ${maxWaitMs / 1000}초)`);
+  console.log(`[meta]    - endpoint=/${containerId}?fields=status_code,status`);
 
   while (Date.now() - start < maxWaitMs) {
+    pollCount += 1;
     const data = await callGraphApi<{ status_code?: string; status?: string }>(
       "GET",
       `/${containerId}`,
@@ -325,7 +347,9 @@ async function waitForContainerReady(
 
     const statusCode = data.status_code ?? data.status ?? "UNKNOWN";
     const elapsedSeconds = Math.round((Date.now() - start) / 1000);
-    console.log(`[meta]    - status=${statusCode}, elapsed=${elapsedSeconds}s`);
+    console.log(
+      `[meta]    - poll=${pollCount}, status=${statusCode}, elapsed=${elapsedSeconds}s, raw=${JSON.stringify(data)}`,
+    );
 
     if (statusCode === "FINISHED") {
       console.log(`[meta] ✅ [2/3] 컨테이너 준비 완료`);
@@ -352,6 +376,8 @@ async function publishContainer(containerId: string): Promise<string> {
   const accessToken = getMetaAccessToken();
 
   console.log(`[meta] 🚀 [3/3] 인스타 Reels 발행 중...`);
+  console.log(`[meta]    - endpoint=/${igUserId}/media_publish`);
+  console.log(`[meta]    - creation_id=${containerId}`);
 
   const data = await callGraphApi<{ id: string }>(
     "POST",
@@ -415,6 +441,9 @@ export async function publishInstagramReel(
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.error(`[meta] ❌ 인스타 Reels 발행 실패: ${message}`);
+    console.error(
+      `[meta] ❌ Instagram error object: ${serializeUnknownError(error)}`,
+    );
     if (error instanceof GraphApiError) {
       console.error(
         `[meta] ❌ Instagram Graph API 에러 상세: status=${error.status}, method=${error.method}, path=${error.path}, graph_code=${error.graphCode ?? "unknown"}`,
@@ -508,6 +537,13 @@ export async function publishFacebookPagePost(
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.error(`[meta] ❌ 페이스북 게시 실패: ${message}`);
+    console.error(`[meta] ❌ Facebook error object: ${serializeUnknownError(error)}`);
+    if (error instanceof GraphApiError) {
+      console.error(
+        `[meta] ❌ Facebook Graph API 에러 상세: status=${error.status}, method=${error.method}, path=${error.path}, graph_code=${error.graphCode ?? "unknown"}`,
+      );
+      console.error(`[meta] ❌ Facebook Graph raw response: ${error.rawBody}`);
+    }
 
     await recordPublish({
       videoId: input.videoId,
