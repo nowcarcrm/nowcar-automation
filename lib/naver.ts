@@ -109,6 +109,14 @@ export async function callNaverApi<T>(params: {
     };
   }
 
+  const headers = (init.headers ?? {}) as Record<string, string>;
+  console.log("[naver-debug] Content-Type:", headers["Content-Type"] ?? "");
+  console.log("[naver-debug] Body raw:", init.body ?? "");
+  console.log(
+    "[naver-debug] Body bytes:",
+    Buffer.from(String(init.body ?? ""), "utf-8").length,
+  );
+
   const response = await fetch(params.endpoint, init);
   const raw = await response.text();
 
