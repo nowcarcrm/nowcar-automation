@@ -109,7 +109,6 @@ export async function callNaverApi<T>(params: {
           if (b >= 0x61 && b <= 0x7a) return String.fromCharCode(b); // a-z
           if (b === 0x2d || b === 0x2e || b === 0x5f || b === 0x7e)
             return String.fromCharCode(b); // - . _ ~
-          if (b === 0x25) return String.fromCharCode(b); // % 유지
           return "%" + b.toString(16).padStart(2, "0").toUpperCase();
         })
         .join("");
