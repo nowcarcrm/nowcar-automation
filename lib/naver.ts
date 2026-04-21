@@ -92,9 +92,14 @@ export async function callNaverApi<T>(params: {
   if (params.body) {
     init.headers = {
       ...(init.headers ?? {}),
-      "Content-Type": "application/x-www-form-urlencoded",
+      "Content-Type": "application/x-www-form-urlencoded; charset=utf-8",
     };
-    init.body = new URLSearchParams(params.body).toString();
+    init.body = Object.entries(params.body)
+      .map(
+        ([key, value]) =>
+          `${encodeURIComponent(key)}=${encodeURIComponent(value)}`,
+      )
+      .join("&");
   }
 
   if (params.accessToken) {
