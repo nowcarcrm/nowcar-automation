@@ -63,9 +63,105 @@ type ContentRow = {
   hashtags: string | null;
 };
 
+type SocialPublishStatus = "pending" | "success" | "failed";
+
 function toErrorMessage(error: unknown): string {
   if (error instanceof Error) return error.message;
   return String(error);
+}
+
+function getPendingTtlMinutes(): number {
+  const raw = process.env.PUBLISH_PENDING_TTL_MINUTES;
+  if (!raw) return 10;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) return 10;
+  return Math.floor(parsed);
+}
+
+async function cleanupStalePendingPublishes(
+  ttlMinutes: number,
+): Promise<void> {
+  const supabase = createAdminClient();
+  const cutoff = new Date(Date.now() - ttlMinutes * 60_000).toISOString();
+  const { error } = await supabase
+    .from("social_publishes")
+    .update({
+      status: "failed",
+      error_message: "pending timeout",
+      updated_at: new Date().toISOString(),
+    })
+    .eq("status", "pending")
+    .is("deleted_at", null)
+    .lt("updated_at", cutoff);
+
+  if (error) {
+    console.warn(
+      `[publish-meta] stale pending 정리 실패(진행은 계속): ${error.message}`,
+    );
+    return;
+  }
+
+  console.log(
+    `[publish-meta] 🧹 stale pending 정리 완료 (ttl_minutes=${ttlMinutes})`,
+  );
+}
+
+async function tryAcquirePublishPendingLock(params: {
+  videoId: string;
+  platform: "instagram" | "facebook";
+  storagePath: string | null;
+  captionPreview: string | null;
+}): Promise<boolean> {
+  const supabase = createAdminClient();
+  const nowIso = new Date().toISOString();
+  const { error } = await supabase.from("social_publishes").insert({
+    video_id: params.videoId,
+    platform: params.platform,
+    status: "pending" as SocialPublishStatus,
+    external_id: null,
+    storage_path: params.storagePath,
+    caption_preview: params.captionPreview,
+    error_message: null,
+    created_at: nowIso,
+    updated_at: nowIso,
+    deleted_at: null,
+  });
+
+  if (!error) return true;
+
+  if ((error as { code?: string }).code === "23505") {
+    return false;
+  }
+
+  throw new Error(`pending 선점 실패: ${error.message}`);
+}
+
+async function updatePublishPendingToFinal(params: {
+  videoId: string;
+  platform: "instagram" | "facebook";
+  status: "success" | "failed";
+  externalId: string | null;
+  errorMessage: string | null;
+  captionPreview: string | null;
+}): Promise<void> {
+  const supabase = createAdminClient();
+  const { error } = await supabase
+    .from("social_publishes")
+    .update({
+      status: params.status,
+      external_id: params.externalId,
+      error_message: params.errorMessage,
+      caption_preview: params.captionPreview,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("video_id", params.videoId)
+    .eq("platform", params.platform)
+    .eq("status", "pending")
+    .is("deleted_at", null);
+
+  if (error) {
+    throw new Error(`pending -> ${params.status} 상태 업데이트 실패: ${error.message}`);
+  }
 }
 
 /**
@@ -86,6 +182,7 @@ export async function runPublishMetaStep(): Promise<PublishMetaResult> {
 
   const igEnabled = isInstagramAutoPublishEnabled();
   const fbEnabled = isFacebookAutoPublishEnabled();
+  const pendingTtlMinutes = getPendingTtlMinutes();
 
   if (!igEnabled && !fbEnabled) {
     console.log(
@@ -95,6 +192,8 @@ export async function runPublishMetaStep(): Promise<PublishMetaResult> {
   }
 
   const supabase = createAdminClient();
+
+  await cleanupStalePendingPublishes(pendingTtlMinutes);
 
   // 1) 대상 영상 조회
   const { data: videos, error: videosError } = await supabase
@@ -118,13 +217,17 @@ export async function runPublishMetaStep(): Promise<PublishMetaResult> {
     `[publish-meta] 📋 대상 영상 ${videos.length}개 (ig=${igEnabled}, fb=${fbEnabled})`,
   );
 
-  // 2) 이미 성공한 (video_id, platform) 조합 조회 → 중복 발행 방지
+  // 2) 이미 성공했거나, TTL 내 pending인 (video_id, platform) 조합 조회 → 중복 발행 방지
   const videoIds = videos.map((v) => v.video_id);
+  const pendingCutoff = new Date(
+    Date.now() - pendingTtlMinutes * 60_000,
+  ).toISOString();
   const { data: publishedRows, error: publishedError } = await supabase
     .from("social_publishes")
-    .select("video_id, platform, status")
+    .select("video_id, platform, status, updated_at")
     .in("video_id", videoIds)
-    .eq("status", "success");
+    .is("deleted_at", null)
+    .in("status", ["success", "pending"]);
 
   if (publishedError) {
     console.warn(
@@ -135,7 +238,14 @@ export async function runPublishMetaStep(): Promise<PublishMetaResult> {
   const successKey = (videoId: string, platform: string) =>
     `${videoId}::${platform}`;
   const alreadySuccess = new Set<string>(
-    (publishedRows ?? []).map((r) => successKey(r.video_id, r.platform)),
+    (publishedRows ?? [])
+      .filter((r) => {
+        if (r.status === "success") return true;
+        const updatedAt = (r as { updated_at?: string | null }).updated_at;
+        if (!updatedAt) return false;
+        return updatedAt >= pendingCutoff;
+      })
+      .map((r) => successKey(r.video_id, r.platform)),
   );
 
   // 3) 영상별 반복 처리 — 하나 실패해도 다음 건은 계속
@@ -215,27 +325,75 @@ export async function runPublishMetaStep(): Promise<PublishMetaResult> {
               igContent.hashtags,
             );
 
-            // 3) 실제 발행
-            const publishResult = await publishInstagramReel({
+            let lockAcquired = false;
+            lockAcquired = await tryAcquirePublishPendingLock({
               videoId: video.video_id,
-              videoUrl: publicUrl,
-              caption,
+              platform: "instagram",
               storagePath: storagePathFromDb,
+              captionPreview: caption.slice(0, 200),
             });
-
-            if (publishResult.success) {
-              result.instagram_published_count += 1;
+            if (!lockAcquired) {
+              console.log(
+                `[publish-meta] ⏭  instagram skip: video_id=${video.video_id}, reason=pending/success lock exists`,
+              );
+              result.instagram_skipped_count += 1;
             } else {
-              result.instagram_failed_count += 1;
-              if (publishResult.errorMessage) {
-                result.errors.push(
-                  `[instagram][${video.video_id}] ${publishResult.errorMessage}`,
-                );
+              const publishResult = await publishInstagramReel({
+                videoId: video.video_id,
+                videoUrl: publicUrl,
+                caption,
+                storagePath: storagePathFromDb,
+                recordResult: false,
+              });
+
+              if (publishResult.success) {
+                await updatePublishPendingToFinal({
+                  videoId: video.video_id,
+                  platform: "instagram",
+                  status: "success",
+                  externalId: publishResult.externalId ?? null,
+                  errorMessage: null,
+                  captionPreview: caption.slice(0, 200),
+                });
+                result.instagram_published_count += 1;
+              } else {
+                await updatePublishPendingToFinal({
+                  videoId: video.video_id,
+                  platform: "instagram",
+                  status: "failed",
+                  externalId: null,
+                  errorMessage:
+                    publishResult.errorMessage ?? "instagram publish failed",
+                  captionPreview: caption.slice(0, 200),
+                });
+                result.instagram_failed_count += 1;
+                if (publishResult.errorMessage) {
+                  result.errors.push(
+                    `[instagram][${video.video_id}] ${publishResult.errorMessage}`,
+                  );
+                }
               }
             }
           }
         } catch (error) {
           const msg = toErrorMessage(error);
+          try {
+            await updatePublishPendingToFinal({
+              videoId: video.video_id,
+              platform: "instagram",
+              status: "failed",
+              externalId: null,
+              errorMessage: msg,
+              captionPreview: igContent?.body
+                ? buildInstagramCaption(igContent.body, igContent.hashtags).slice(
+                    0,
+                    200,
+                  )
+                : null,
+            });
+          } catch {
+            // pending 상태 업데이트 실패는 기존 에러 로그로 추적
+          }
           console.error(`[publish-meta] ❌ 인스타 처리 중 예외: ${msg}`);
           result.errors.push(`[instagram][${video.video_id}] ${msg}`);
           result.instagram_failed_count += 1;
@@ -284,25 +442,68 @@ export async function runPublishMetaStep(): Promise<PublishMetaResult> {
         }
 
         try {
-          const publishResult = await publishFacebookReels({
+          const lockAcquired = await tryAcquirePublishPendingLock({
             videoId: video.video_id,
-            videoUrl: publicUrl,
-            caption,
+            platform: "facebook",
             storagePath: storagePathFromDb,
+            captionPreview: caption.slice(0, 200),
           });
-
-          if (publishResult.success) {
-            result.facebook_published_count += 1;
+          if (!lockAcquired) {
+            console.log(
+              `[publish-meta] ⏭  facebook skip: video_id=${video.video_id}, reason=pending/success lock exists`,
+            );
+            result.facebook_skipped_count += 1;
           } else {
-            result.facebook_failed_count += 1;
-            if (publishResult.errorMessage) {
-              result.errors.push(
-                `[facebook][${video.video_id}] ${publishResult.errorMessage}`,
-              );
+            const publishResult = await publishFacebookReels({
+              videoId: video.video_id,
+              videoUrl: publicUrl,
+              caption,
+              storagePath: storagePathFromDb,
+              recordResult: false,
+            });
+
+            if (publishResult.success) {
+              await updatePublishPendingToFinal({
+                videoId: video.video_id,
+                platform: "facebook",
+                status: "success",
+                externalId: publishResult.externalId ?? null,
+                errorMessage: null,
+                captionPreview: caption.slice(0, 200),
+              });
+              result.facebook_published_count += 1;
+            } else {
+              await updatePublishPendingToFinal({
+                videoId: video.video_id,
+                platform: "facebook",
+                status: "failed",
+                externalId: null,
+                errorMessage:
+                  publishResult.errorMessage ?? "facebook reels publish failed",
+                captionPreview: caption.slice(0, 200),
+              });
+              result.facebook_failed_count += 1;
+              if (publishResult.errorMessage) {
+                result.errors.push(
+                  `[facebook][${video.video_id}] ${publishResult.errorMessage}`,
+                );
+              }
             }
           }
         } catch (error) {
           const msg = toErrorMessage(error);
+          try {
+            await updatePublishPendingToFinal({
+              videoId: video.video_id,
+              platform: "facebook",
+              status: "failed",
+              externalId: null,
+              errorMessage: msg,
+              captionPreview: caption.slice(0, 200),
+            });
+          } catch {
+            // pending 상태 업데이트 실패는 기존 에러 로그로 추적
+          }
           console.error(`[publish-meta] ❌ 페북 처리 중 예외: ${msg}`);
           result.errors.push(`[facebook][${video.video_id}] ${msg}`);
           result.facebook_failed_count += 1;

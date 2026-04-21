@@ -41,6 +41,8 @@ export interface InstagramPublishInput {
   caption: string;
   /** Supabase Storage 경로 (선택, DB 기록용) */
   storagePath?: string;
+  /** true면 내부 recordPublish 수행, false면 호출자가 상태 기록 */
+  recordResult?: boolean;
 }
 
 export interface FacebookPublishInput {
@@ -59,6 +61,8 @@ export interface FacebookReelsPublishInput {
   caption: string;
   /** Supabase Storage 경로 */
   storagePath: string;
+  /** true면 내부 recordPublish 수행, false면 호출자가 상태 기록 */
+  recordResult?: boolean;
 }
 
 export interface PublishResult {
@@ -371,15 +375,17 @@ export async function publishInstagramReel(
     await waitForContainerReady(containerId);
     const mediaId = await publishContainer(containerId);
 
-    await recordPublish({
-      videoId: input.videoId,
-      platform: "instagram",
-      status: "success",
-      externalId: mediaId,
-      storagePath: input.storagePath ?? null,
-      captionPreview: input.caption.slice(0, 200),
-      errorMessage: null,
-    });
+    if (input.recordResult !== false) {
+      await recordPublish({
+        videoId: input.videoId,
+        platform: "instagram",
+        status: "success",
+        externalId: mediaId,
+        storagePath: input.storagePath ?? null,
+        captionPreview: input.caption.slice(0, 200),
+        errorMessage: null,
+      });
+    }
 
     return {
       success: true,
@@ -399,15 +405,17 @@ export async function publishInstagramReel(
       console.error(`[meta] ❌ Instagram Graph raw response: ${error.rawBody}`);
     }
 
-    await recordPublish({
-      videoId: input.videoId,
-      platform: "instagram",
-      status: "failed",
-      externalId: null,
-      storagePath: input.storagePath ?? null,
-      captionPreview: input.caption.slice(0, 200),
-      errorMessage: message,
-    });
+    if (input.recordResult !== false) {
+      await recordPublish({
+        videoId: input.videoId,
+        platform: "instagram",
+        status: "failed",
+        externalId: null,
+        storagePath: input.storagePath ?? null,
+        captionPreview: input.caption.slice(0, 200),
+        errorMessage: message,
+      });
+    }
 
     await sendMetaFailureAlert({
       platform: "instagram",
@@ -628,15 +636,17 @@ export async function publishFacebookReels(
       input.caption,
     );
 
-    await recordPublish({
-      videoId: input.videoId,
-      platform: "facebook",
-      status: "success",
-      externalId,
-      storagePath: input.storagePath,
-      captionPreview: input.caption.slice(0, 200),
-      errorMessage: null,
-    });
+    if (input.recordResult !== false) {
+      await recordPublish({
+        videoId: input.videoId,
+        platform: "facebook",
+        status: "success",
+        externalId,
+        storagePath: input.storagePath,
+        captionPreview: input.caption.slice(0, 200),
+        errorMessage: null,
+      });
+    }
 
     return {
       success: true,
@@ -656,15 +666,17 @@ export async function publishFacebookReels(
       console.error(`[meta] ❌ Facebook Graph raw response: ${error.rawBody}`);
     }
 
-    await recordPublish({
-      videoId: input.videoId,
-      platform: "facebook",
-      status: "failed",
-      externalId: null,
-      storagePath: input.storagePath,
-      captionPreview: input.caption.slice(0, 200),
-      errorMessage: message,
-    });
+    if (input.recordResult !== false) {
+      await recordPublish({
+        videoId: input.videoId,
+        platform: "facebook",
+        status: "failed",
+        externalId: null,
+        storagePath: input.storagePath,
+        captionPreview: input.caption.slice(0, 200),
+        errorMessage: message,
+      });
+    }
 
     await sendMetaFailureAlert({
       platform: "facebook",
@@ -784,7 +796,7 @@ export async function publishFacebookPagePost(
 interface RecordPublishInput {
   videoId: string;
   platform: "instagram" | "facebook";
-  status: "success" | "failed";
+  status: "pending" | "success" | "failed";
   externalId: string | null;
   storagePath: string | null;
   captionPreview: string | null;
