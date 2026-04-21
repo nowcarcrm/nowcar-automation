@@ -1,4 +1,4 @@
-import iconv from "iconv-lite";
+// import iconv from "iconv-lite";
 
 type NaverApiMethod = "GET" | "POST";
 
@@ -92,14 +92,14 @@ export async function callNaverApi<T>(params: {
   const init: RequestInit = { method: params.method };
 
   if (params.body) {
-    // Plan D: UTF-8 percent-encoding + Content-Type without charset
-    const encodedBodyString = Object.entries(params.body)
-      .map(([key, value]) => {
-        const keyStr = encodeURIComponent(String(key));
-        const valStr = encodeURIComponent(String(value));
-        return `${keyStr}=${valStr}`;
-      })
-      .join("&");
+    // URLSearchParams = Python urllib.parse.urlencode 와 동등한 form 인코딩
+    // - UTF-8 percent-encoding
+    // - 공백은 '+' 로 인코딩
+    const urlParams = new URLSearchParams();
+    Object.entries(params.body).forEach(([key, value]) => {
+      urlParams.append(String(key), String(value));
+    });
+    const encodedBodyString = urlParams.toString();
 
     const bodyBuffer = Buffer.from(encodedBodyString, "utf-8");
 
@@ -110,6 +110,11 @@ export async function callNaverApi<T>(params: {
     };
 
     init.body = bodyBuffer as unknown as BodyInit;
+
+    console.log("[naver-debug] Using URLSearchParams (Python urlencode equivalent)");
+    console.log(`[naver-debug] Body sample: ${encodedBodyString.substring(0, 300)}`);
+    console.log(`[naver-debug] Body bytes: ${bodyBuffer.length}`);
+    console.log(`[naver-debug] Has '+' for space: ${encodedBodyString.includes("+")}`);
   }
 
   if (params.accessToken) {
