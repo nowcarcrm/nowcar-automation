@@ -1,3 +1,5 @@
+import iconv from "iconv-lite";
+
 type NaverApiMethod = "GET" | "POST";
 
 interface NaverErrorBody {
@@ -90,38 +92,42 @@ export async function callNaverApi<T>(params: {
   const init: RequestInit = { method: params.method };
 
   if (params.body) {
-    // 1) key/value percent-encoding (UTF-8 기반)
+    // 네이버 카페 API는 EUC-KR 레거시 시스템.
+    // UTF-8 Buffer 전송 시 Success 응답은 받지만 실제 저장되는 글자가 깨짐.
+    // iconv-lite로 값을 EUC-KR 바이트로 변환 후 percent-encoding 해야 함.
+    function encodeValueAsEucKr(value: string): string {
+      const euckrBytes = iconv.encode(value, "euc-kr");
+      return Array.from(euckrBytes)
+        .map((b) => "%" + b.toString(16).padStart(2, "0").toUpperCase())
+        .join("");
+    }
+
     const encodedBodyString = Object.entries(params.body)
       .map(([key, value]) => {
-        const keyStr = encodeURIComponent(String(key));
-        const valStr = encodeURIComponent(String(value));
+        const keyStr = String(key);
+        const valStr = encodeValueAsEucKr(String(value));
         return `${keyStr}=${valStr}`;
       })
       .join("&");
 
-    // 2) string -> explicit UTF-8 bytes
-    const bodyBuffer = Buffer.from(encodedBodyString, "utf-8");
+    // percent-encoded 문자열은 ASCII 안전이므로 latin1 버퍼로 전송 가능
+    const bodyBuffer = Buffer.from(encodedBodyString, "latin1");
 
-    // 3) headers with exact byte length
     init.headers = {
       ...(init.headers ?? {}),
-      "Content-Type": "application/x-www-form-urlencoded; charset=utf-8",
+      "Content-Type": "application/x-www-form-urlencoded; charset=euc-kr",
       "Content-Length": String(bodyBuffer.length),
     };
 
-    // 4) send Buffer body
     init.body = bodyBuffer as unknown as BodyInit;
 
-    // debug logs
     console.log(
-      "[naver-debug] Content-Type: application/x-www-form-urlencoded; charset=utf-8",
+      "[naver-debug] Content-Type: application/x-www-form-urlencoded; charset=euc-kr",
     );
     console.log(
-      `[naver-debug] Body encoded string: ${encodedBodyString.substring(0, 300)}`,
+      `[naver-debug] Body encoded (EUC-KR): ${encodedBodyString.substring(0, 300)}`,
     );
-    console.log(
-      `[naver-debug] Body bytes (Buffer length): ${bodyBuffer.length}`,
-    );
+    console.log(`[naver-debug] Body bytes: ${bodyBuffer.length}`);
     console.log(
       `[naver-debug] Body first 50 bytes hex: ${bodyBuffer.subarray(0, 50).toString("hex")}`,
     );
