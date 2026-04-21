@@ -115,15 +115,16 @@ export async function callNaverApi<T>(params: {
 
     init.headers = {
       ...(init.headers ?? {}),
-      "Content-Type": "application/x-www-form-urlencoded; charset=euc-kr",
+      "Content-Type": "application/x-www-form-urlencoded",
       "Content-Length": String(bodyBuffer.length),
     };
 
     init.body = bodyBuffer as unknown as BodyInit;
 
     console.log(
-      "[naver-debug] Content-Type: application/x-www-form-urlencoded; charset=euc-kr",
+      "[naver-debug] Content-Type: application/x-www-form-urlencoded (no charset)",
     );
+    console.log("[naver-debug] Body bytes encoding: EUC-KR");
     console.log(
       `[naver-debug] Body encoded (EUC-KR): ${encodedBodyString.substring(0, 300)}`,
     );
