@@ -1,4 +1,4 @@
-// import iconv from "iconv-lite";
+import iconv from "iconv-lite";
 
 type NaverApiMethod = "GET" | "POST";
 
@@ -92,16 +92,39 @@ export async function callNaverApi<T>(params: {
   const init: RequestInit = { method: params.method };
 
   if (params.body) {
-    // URLSearchParams = Python urllib.parse.urlencode 와 동등한 form 인코딩
-    // - UTF-8 percent-encoding
-    // - 공백은 '+' 로 인코딩
-    const urlParams = new URLSearchParams();
-    Object.entries(params.body).forEach(([key, value]) => {
-      urlParams.append(String(key), String(value));
-    });
-    const encodedBodyString = urlParams.toString();
+    // 네이버 공식 문서 요구사항: UTF-8 encode 후 MS949(CP949)로 재 encode
+    // Java: URLEncoder.encode(URLEncoder.encode(value, "UTF-8"), "MS949")
+    // C#: UrlEncode(UrlEncode(value), EUC-KR)
+    function doubleEncodeForNaver(value: string): string {
+      // 1단계: UTF-8 URL encoding
+      const firstEncoded = encodeURIComponent(value);
 
-    const bodyBuffer = Buffer.from(encodedBodyString, "utf-8");
+      // 2단계: 1단계 결과를 MS949 바이트로 변환 후 percent-encoding
+      const ms949Bytes = iconv.encode(firstEncoded, "cp949");
+      return Array.from(ms949Bytes)
+        .map((b) => {
+          // ASCII 안전 문자는 그대로
+          if (b >= 0x30 && b <= 0x39) return String.fromCharCode(b); // 0-9
+          if (b >= 0x41 && b <= 0x5a) return String.fromCharCode(b); // A-Z
+          if (b >= 0x61 && b <= 0x7a) return String.fromCharCode(b); // a-z
+          if (b === 0x2d || b === 0x2e || b === 0x5f || b === 0x7e)
+            return String.fromCharCode(b); // - . _ ~
+          if (b === 0x25) return String.fromCharCode(b); // % 유지
+          return "%" + b.toString(16).padStart(2, "0").toUpperCase();
+        })
+        .join("");
+    }
+
+    const encodedBodyString = Object.entries(params.body)
+      .map(([key, value]) => {
+        const keyStr = String(key); // key는 ASCII
+        const valStr = doubleEncodeForNaver(String(value));
+        return `${keyStr}=${valStr}`;
+      })
+      .join("&");
+
+    // percent-encoded 문자열은 ASCII 안전 → latin1 버퍼 변환
+    const bodyBuffer = Buffer.from(encodedBodyString, "latin1");
 
     init.headers = {
       ...(init.headers ?? {}),
@@ -111,10 +134,9 @@ export async function callNaverApi<T>(params: {
 
     init.body = bodyBuffer as unknown as BodyInit;
 
-    console.log("[naver-debug] Using URLSearchParams (Python urlencode equivalent)");
+    console.log("[naver-debug] Double encoding (UTF-8 → MS949) applied");
     console.log(`[naver-debug] Body sample: ${encodedBodyString.substring(0, 300)}`);
     console.log(`[naver-debug] Body bytes: ${bodyBuffer.length}`);
-    console.log(`[naver-debug] Has '+' for space: ${encodedBodyString.includes("+")}`);
   }
 
   if (params.accessToken) {
