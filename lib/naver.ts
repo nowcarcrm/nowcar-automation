@@ -110,15 +110,6 @@ export async function callNaverApi<T>(params: {
     };
 
     init.body = bodyBuffer as unknown as BodyInit;
-
-    console.log(
-      "[naver-debug] Content-Type: application/x-www-form-urlencoded (no charset, UTF-8 body)",
-    );
-    console.log(`[naver-debug] Body encoded: ${encodedBodyString.substring(0, 300)}`);
-    console.log(`[naver-debug] Body bytes: ${bodyBuffer.length}`);
-    console.log(
-      `[naver-debug] Body first 50 bytes hex: ${bodyBuffer.subarray(0, 50).toString("hex")}`,
-    );
   }
 
   if (params.accessToken) {
