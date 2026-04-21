@@ -3,7 +3,9 @@ import {
   buildInstagramCaption,
   isFacebookAutoPublishEnabled,
   isInstagramAutoPublishEnabled,
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   publishFacebookPagePost,
+  publishFacebookReels,
   publishInstagramReel,
 } from "@/lib/meta";
 
@@ -17,7 +19,7 @@ import {
  *   1) youtube_videos 테이블에서 processed=true 인 최근 영상 N개 조회
  *   2) 각 영상별로 social_publishes 를 확인해
  *        - 인스타에 아직 성공 기록이 없으면 → 릴스 발행
- *        - 페북에 아직 성공 기록이 없으면   → 페이지 텍스트 게시
+ *        - 페북에 아직 성공 기록이 없으면   → Reels 네이티브 영상 발행
  *   3) 인스타 발행은 영상이 필요하므로 Supabase Storage 업로드까지 수행
  *   4) 한 영상/플랫폼이 실패해도 다른 건은 계속 처리(try-catch 개별화)
  *
@@ -194,42 +196,42 @@ export async function runPublishMetaStep(): Promise<PublishMetaResult> {
               `[publish-meta] ⏭  instagram skip: video_id=${video.video_id}, reason=storage_path not set by local worker`,
             );
             result.instagram_skipped_count += 1;
-            continue;
-          }
-          storagePath = storagePathFromDb;
-
-          const { data: publicUrlData } = supabase.storage
-            .from(TEMP_VIDEOS_BUCKET)
-            .getPublicUrl(storagePathFromDb);
-          const publicUrl = publicUrlData?.publicUrl;
-          if (!publicUrl) {
-            throw new Error(
-              `스토리지 공개 URL 생성 실패(video_id=${video.video_id}, path=${storagePathFromDb})`,
-            );
-          }
-
-          // 2) 캡션 조립
-          const caption = buildInstagramCaption(
-            igContent.body,
-            igContent.hashtags,
-          );
-
-          // 3) 실제 발행
-          const publishResult = await publishInstagramReel({
-            videoId: video.video_id,
-            videoUrl: publicUrl,
-            caption,
-            storagePath: storagePathFromDb,
-          });
-
-          if (publishResult.success) {
-            result.instagram_published_count += 1;
           } else {
-            result.instagram_failed_count += 1;
-            if (publishResult.errorMessage) {
-              result.errors.push(
-                `[instagram][${video.video_id}] ${publishResult.errorMessage}`,
+            storagePath = storagePathFromDb;
+
+            const { data: publicUrlData } = supabase.storage
+              .from(TEMP_VIDEOS_BUCKET)
+              .getPublicUrl(storagePathFromDb);
+            const publicUrl = publicUrlData?.publicUrl;
+            if (!publicUrl) {
+              throw new Error(
+                `스토리지 공개 URL 생성 실패(video_id=${video.video_id}, path=${storagePathFromDb})`,
               );
+            }
+
+            // 2) 캡션 조립
+            const caption = buildInstagramCaption(
+              igContent.body,
+              igContent.hashtags,
+            );
+
+            // 3) 실제 발행
+            const publishResult = await publishInstagramReel({
+              videoId: video.video_id,
+              videoUrl: publicUrl,
+              caption,
+              storagePath: storagePathFromDb,
+            });
+
+            if (publishResult.success) {
+              result.instagram_published_count += 1;
+            } else {
+              result.instagram_failed_count += 1;
+              if (publishResult.errorMessage) {
+                result.errors.push(
+                  `[instagram][${video.video_id}] ${publishResult.errorMessage}`,
+                );
+              }
             }
           }
         } catch (error) {
@@ -245,29 +247,48 @@ export async function runPublishMetaStep(): Promise<PublishMetaResult> {
     }
 
     // ────────────────────────────────────
-    // (B) 페이스북 페이지 텍스트 게시
-    //    → 영상 파일 불필요, 텍스트만 올림
-    //    → 우선순위: naver_blog 본문 > instagram 본문
+    // (B) 페이스북 Reels 네이티브 영상 발행
+    //    → 캡션 우선순위: instagram 본문 > naver_blog 본문
+    //    → storage_path 가 없으면 로컬 워커 완료까지 스킵
     // ────────────────────────────────────
     if (needFb) {
-      const fbMessageSource = blogContent?.body ?? igContent?.body ?? null;
-
-      if (!fbMessageSource) {
-        const msg = `페북 스킵(${video.video_id}): 사용 가능한 콘텐츠가 없음`;
-        console.warn(`[publish-meta] ⚠️  ${msg}`);
-        result.errors.push(msg);
+      const storagePathFromDb = video.storage_path;
+      if (!storagePathFromDb) {
+        console.warn(
+          `[publish-meta] ⏭  facebook skip: video_id=${video.video_id}, reason=storage_path not set by local worker`,
+        );
         result.facebook_skipped_count += 1;
       } else {
-        // 원본 영상 링크를 하단에 덧붙여 트래픽 유도
-        const youtubeLink = video.video_url
-          ? `\n\n🎬 원본 영상: ${video.video_url}`
-          : "";
-        const fbMessage = `${fbMessageSource.trim()}${youtubeLink}`;
+        const caption = igContent?.body
+          ? buildInstagramCaption(igContent.body, igContent.hashtags)
+          : blogContent?.body?.trim() ?? null;
+
+        if (!caption) {
+          const msg = `페북 스킵(${video.video_id}): instagram/naver_blog 캡션 소스가 없음`;
+          console.warn(`[publish-meta] ⚠️  ${msg}`);
+          result.errors.push(msg);
+          result.facebook_skipped_count += 1;
+          continue;
+        }
+
+        const { data: publicUrlData } = supabase.storage
+          .from(TEMP_VIDEOS_BUCKET)
+          .getPublicUrl(storagePathFromDb);
+        const publicUrl = publicUrlData?.publicUrl;
+        if (!publicUrl) {
+          const msg = `페북 실패(${video.video_id}): 스토리지 공개 URL 생성 실패(path=${storagePathFromDb})`;
+          console.error(`[publish-meta] ❌ ${msg}`);
+          result.errors.push(msg);
+          result.facebook_failed_count += 1;
+          continue;
+        }
 
         try {
-          const publishResult = await publishFacebookPagePost({
+          const publishResult = await publishFacebookReels({
             videoId: video.video_id,
-            message: fbMessage,
+            videoUrl: publicUrl,
+            caption,
+            storagePath: storagePathFromDb,
           });
 
           if (publishResult.success) {

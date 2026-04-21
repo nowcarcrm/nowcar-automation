@@ -11,7 +11,12 @@ import { createAdminClient } from "./storage";
  *       2) 컨테이너 상태 폴링 (GET /{container_id}?fields=status_code)
  *       3) 발행 (POST /{ig_user_id}/media_publish)
  *
- *   - Facebook 페이지 텍스트 게시:
+ *   - Facebook Reels:
+ *       1) 업로드 세션 시작 (POST /{page_id}/video_reels?upload_phase=start)
+ *       2) rupload 업로드 (file_url 우선, 실패 시 binary fallback)
+ *       3) 게시 완료 (POST /{page_id}/video_reels?upload_phase=finish&video_state=PUBLISHED)
+ *
+ *   - Facebook 페이지 텍스트 게시(비상용 레거시):
  *       POST /{page_id}/feed
  *
  * 발행 이력은 social_publishes 테이블에 기록하고,
@@ -43,6 +48,17 @@ export interface FacebookPublishInput {
   videoId: string;
   /** 페북 피드에 올릴 본문 전체 */
   message: string;
+}
+
+export interface FacebookReelsPublishInput {
+  /** 원본 유튜브 video_id (social_publishes 에 기록용) */
+  videoId: string;
+  /** Meta 서버가 접근 가능한 공개 mp4 URL (Supabase public URL) */
+  videoUrl: string;
+  /** Reels description */
+  caption: string;
+  /** Supabase Storage 경로 */
+  storagePath: string;
 }
 
 export interface PublishResult {
@@ -410,7 +426,264 @@ export async function publishInstagramReel(
 }
 
 /* ------------------------------------------------------------
- * 2) 페이스북 페이지 텍스트 게시
+ * 2) 페이스북 Reels 발행 (Page Video Reels API)
+ * ---------------------------------------------------------- */
+
+interface FacebookReelsStartResponse {
+  video_id?: string;
+  upload_url?: string;
+}
+
+interface FacebookReelsFinishResponse {
+  success?: boolean;
+  post_id?: string;
+  video_id?: string;
+  message?: string;
+}
+
+function normalizeRuploadError(status: number, raw: string): string {
+  if (!raw) return `HTTP ${status}`;
+  try {
+    const parsed = JSON.parse(raw) as GraphErrorBody;
+    const message = parsed?.error?.message ?? raw;
+    return `HTTP ${status}: ${message}`;
+  } catch {
+    return `HTTP ${status}: ${raw}`;
+  }
+}
+
+async function startFacebookReelsSession(
+  pageId: string,
+  accessToken: string,
+): Promise<{ videoId: string; uploadUrl: string }> {
+  console.log(`[meta] 📦 [fb-reels:1-start] 업로드 세션 시작 - page_id=${pageId}`);
+  const data = await callGraphApi<FacebookReelsStartResponse>(
+    "POST",
+    `/${pageId}/video_reels`,
+    {
+      upload_phase: "start",
+      access_token: accessToken,
+    },
+  );
+
+  if (!data.video_id || !data.upload_url) {
+    throw new Error(
+      `[fb-reels:1-start] 응답에 video_id/upload_url 없음: ${JSON.stringify(data)}`,
+    );
+  }
+
+  console.log(
+    `[meta] ✅ [fb-reels:1-start] 세션 시작 완료 - video_id=${data.video_id}`,
+  );
+  return { videoId: data.video_id, uploadUrl: data.upload_url };
+}
+
+async function uploadFacebookReelsByFileUrl(
+  uploadUrl: string,
+  pageAccessToken: string,
+  fileUrl: string,
+): Promise<void> {
+  console.log(
+    `[meta] ⬆️ [fb-reels:2-upload-file_url] rupload 시작 - file_url=${fileUrl}`,
+  );
+
+  const response = await fetch(uploadUrl, {
+    method: "POST",
+    headers: {
+      authorization: `OAuth ${pageAccessToken}`,
+      file_url: fileUrl,
+    },
+  });
+
+  const raw = await response.text();
+  if (!response.ok) {
+    throw new Error(
+      `[fb-reels:2-upload-file_url] ${normalizeRuploadError(response.status, raw)}`,
+    );
+  }
+
+  console.log(`[meta] ✅ [fb-reels:2-upload-file_url] 완료`);
+}
+
+async function uploadFacebookReelsByBinaryFallback(
+  uploadUrl: string,
+  pageAccessToken: string,
+  fileUrl: string,
+): Promise<void> {
+  // fallback 경로: file_url 업로드가 거부될 때만 서버에서 파일을 읽어 바이너리 업로드
+  console.log(`[meta] ⬆️ [fb-reels:2-upload-binary] fallback 시작`);
+
+  const sourceResponse = await fetch(fileUrl);
+  if (!sourceResponse.ok) {
+    throw new Error(
+      `[fb-reels:2-upload-binary] 소스 파일 다운로드 실패: HTTP ${sourceResponse.status}`,
+    );
+  }
+
+  const buffer = Buffer.from(await sourceResponse.arrayBuffer());
+  const uploadResponse = await fetch(uploadUrl, {
+    method: "POST",
+    headers: {
+      authorization: `OAuth ${pageAccessToken}`,
+      offset: "0",
+      file_size: String(buffer.byteLength),
+      "Content-Type": "application/octet-stream",
+    },
+    body: buffer,
+  });
+
+  const raw = await uploadResponse.text();
+  if (!uploadResponse.ok) {
+    throw new Error(
+      `[fb-reels:2-upload-binary] ${normalizeRuploadError(uploadResponse.status, raw)}`,
+    );
+  }
+
+  console.log(`[meta] ✅ [fb-reels:2-upload-binary] fallback 완료`);
+}
+
+async function finishFacebookReelsPublish(
+  pageId: string,
+  pageAccessToken: string,
+  videoId: string,
+  caption: string,
+): Promise<string> {
+  console.log(
+    `[meta] 🚀 [fb-reels:3-finish] 게시 요청 - page_id=${pageId}, video_id=${videoId}`,
+  );
+  const data = await callGraphApi<FacebookReelsFinishResponse>(
+    "POST",
+    `/${pageId}/video_reels`,
+    {
+      upload_phase: "finish",
+      video_id: videoId,
+      video_state: "PUBLISHED",
+      description: caption,
+      access_token: pageAccessToken,
+    },
+  );
+
+  const externalId = data.post_id ?? data.video_id ?? videoId;
+  if (!externalId) {
+    throw new Error(
+      `[fb-reels:3-finish] 응답에 post_id/video_id 없음: ${JSON.stringify(data)}`,
+    );
+  }
+  if (data.success === false) {
+    throw new Error(
+      `[fb-reels:3-finish] success=false, message=${data.message ?? "unknown"}`,
+    );
+  }
+
+  console.log(`[meta] ✅ [fb-reels:3-finish] 게시 완료 - external_id=${externalId}`);
+  return externalId;
+}
+
+/**
+ * 페이스북 페이지 Reels 를 자동 발행한다.
+ *   - 3단계(start → rupload → finish)
+ *   - rupload 는 file_url 우선, 실패 시 바이너리 업로드로 fallback
+ *   - 실패 시 social_publishes 에 failed 로그 + Gmail 알림
+ */
+export async function publishFacebookReels(
+  input: FacebookReelsPublishInput,
+): Promise<PublishResult> {
+  if (!isFacebookAutoPublishEnabled()) {
+    const msg = "AUTO_PUBLISH_FACEBOOK=true 가 아니므로 스킵";
+    console.log(`[meta] ⏭  ${msg}`);
+    return { success: false, platform: "facebook", errorMessage: msg };
+  }
+
+  const pageId = getFacebookPageId();
+
+  try {
+    const pageAccessToken = getFacebookPageAccessToken();
+    console.log(
+      `[meta] 🎯 페이스북 Reels 발행 요청: video_id=${input.videoId}, storage_path=${input.storagePath}`,
+    );
+
+    const { videoId, uploadUrl } = await startFacebookReelsSession(
+      pageId,
+      pageAccessToken,
+    );
+
+    try {
+      await uploadFacebookReelsByFileUrl(uploadUrl, pageAccessToken, input.videoUrl);
+    } catch (error) {
+      const fileUrlError = error instanceof Error ? error.message : String(error);
+      console.warn(
+        `[meta] ⚠️ [fb-reels:2-upload-file_url] 실패 → binary fallback 시도: ${fileUrlError}`,
+      );
+      await uploadFacebookReelsByBinaryFallback(
+        uploadUrl,
+        pageAccessToken,
+        input.videoUrl,
+      );
+    }
+
+    const externalId = await finishFacebookReelsPublish(
+      pageId,
+      pageAccessToken,
+      videoId,
+      input.caption,
+    );
+
+    await recordPublish({
+      videoId: input.videoId,
+      platform: "facebook",
+      status: "success",
+      externalId,
+      storagePath: input.storagePath,
+      captionPreview: input.caption.slice(0, 200),
+      errorMessage: null,
+    });
+
+    return {
+      success: true,
+      platform: "facebook",
+      externalId,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`[meta] ❌ 페이스북 Reels 발행 실패: ${message}`);
+    console.error(
+      `[meta] ❌ Facebook Reels error object: ${serializeUnknownError(error)}`,
+    );
+    if (error instanceof GraphApiError) {
+      console.error(
+        `[meta] ❌ Facebook Graph API 에러 상세: status=${error.status}, method=${error.method}, path=${error.path}, graph_code=${error.graphCode ?? "unknown"}`,
+      );
+      console.error(`[meta] ❌ Facebook Graph raw response: ${error.rawBody}`);
+    }
+
+    await recordPublish({
+      videoId: input.videoId,
+      platform: "facebook",
+      status: "failed",
+      externalId: null,
+      storagePath: input.storagePath,
+      captionPreview: input.caption.slice(0, 200),
+      errorMessage: message,
+    });
+
+    await sendMetaFailureAlert({
+      platform: "facebook",
+      videoId: input.videoId,
+      errorMessage: message,
+    }).catch((err) => {
+      console.error(`[meta] 알림 메일 발송도 실패: ${String(err)}`);
+    });
+
+    return {
+      success: false,
+      platform: "facebook",
+      errorMessage: message,
+    };
+  }
+}
+
+/* ------------------------------------------------------------
+ * 3) 페이스북 페이지 텍스트 게시 (비상용 레거시)
  * ---------------------------------------------------------- */
 
 /**
@@ -418,6 +691,7 @@ export async function publishInstagramReel(
  *   - 영상 업로드가 아닌 "텍스트 게시" 용도 (요구사항 기준)
  *   - 실패 시 social_publishes 기록 + Gmail 알림
  */
+/** @deprecated 기본 파이프라인은 publishFacebookReels 를 사용한다. */
 export async function publishFacebookPagePost(
   input: FacebookPublishInput,
 ): Promise<PublishResult> {
@@ -504,7 +778,7 @@ export async function publishFacebookPagePost(
 }
 
 /* ------------------------------------------------------------
- * 3) social_publishes DB 기록
+ * 4) social_publishes DB 기록
  * ---------------------------------------------------------- */
 
 interface RecordPublishInput {
@@ -541,7 +815,7 @@ async function recordPublish(input: RecordPublishInput): Promise<void> {
 }
 
 /* ------------------------------------------------------------
- * 4) Meta 발행 실패 시 Gmail 알림
+ * 5) Meta 발행 실패 시 Gmail 알림
  * ---------------------------------------------------------- */
 
 interface FailureAlertInput {
@@ -600,7 +874,7 @@ async function sendMetaFailureAlert(input: FailureAlertInput): Promise<void> {
 }
 
 /* ------------------------------------------------------------
- * 5) 캡션 조립 유틸 (인스타용)
+ * 6) 캡션 조립 유틸 (인스타용)
  * ---------------------------------------------------------- */
 
 /**
