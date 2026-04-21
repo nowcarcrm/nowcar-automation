@@ -3,6 +3,7 @@ import { runDetectStep } from "@/lib/pipeline/detect";
 import { runGenerateStep } from "@/lib/pipeline/generate";
 import { runEmailStep } from "@/lib/pipeline/email";
 import { runPublishMetaStep } from "@/lib/pipeline/publish-meta";
+import { runPublishNaverCafeStep } from "@/lib/pipeline/publish-naver-cafe";
 import { sendToTistory } from "@/lib/mailer";
 import { getPendingTistoryContents, markContentPublished } from "@/lib/supabase";
 
@@ -35,6 +36,15 @@ interface EmailStepResult {
   duration_seconds: number;
 }
 
+interface PublishNaverCafeStepResult {
+  status: StepStatus;
+  processed_videos_count: number;
+  naver_cafe_published_count: number;
+  naver_cafe_failed_count: number;
+  naver_cafe_skipped_count: number;
+  duration_seconds: number;
+}
+
 interface PublishMetaStepResult {
   status: StepStatus;
   processed_videos_count: number;
@@ -56,7 +66,8 @@ interface PipelineResponse {
     step1_detect: DetectStepResult;
     step2_generate: GenerateStepResult;
     step3_publish_meta: PublishMetaStepResult;
-    step4_email: EmailStepResult;
+    step4_publish_naver_cafe: PublishNaverCafeStepResult;
+    step5_email: EmailStepResult;
   };
   summary: string;
   errors: string[];
@@ -110,6 +121,14 @@ export async function GET(request: NextRequest) {
     emails_failed_count: 0,
     tistory_published_count: 0,
     tistory_failed_count: 0,
+    duration_seconds: 0,
+  };
+  const step5: PublishNaverCafeStepResult = {
+    status: "skipped",
+    processed_videos_count: 0,
+    naver_cafe_published_count: 0,
+    naver_cafe_failed_count: 0,
+    naver_cafe_skipped_count: 0,
     duration_seconds: 0,
   };
 
@@ -216,15 +235,54 @@ export async function GET(request: NextRequest) {
     console.error(`[pipeline] step3 실패: ${message}`);
   }
 
-  // [4/4] 이메일 발송 (대표님 메일 + 티스토리)
+  // [4/5] 네이버 카페 자동 발행
   const step4StartedAt = Date.now();
   try {
-    if (skipEmail) {
-      console.log("[4/4] ⏭️ skip_email=true 설정으로 이메일 단계를 건너뜁니다.");
-      step4.status = "skipped";
-      step4.duration_seconds = Math.round((Date.now() - step4StartedAt) / 1000);
+    console.log("[4/5] ☕ 네이버 카페 자동 발행 시작...");
+    const data = await runPublishNaverCafeStep();
+
+    step5.processed_videos_count = data.processed_videos_count;
+    step5.naver_cafe_published_count = data.naver_cafe_published_count;
+    step5.naver_cafe_failed_count = data.naver_cafe_failed_count;
+    step5.naver_cafe_skipped_count = data.naver_cafe_skipped_count;
+
+    const totalTried =
+      data.naver_cafe_published_count + data.naver_cafe_failed_count;
+    if (totalTried === 0) {
+      step5.status = "skipped";
+    } else if (data.naver_cafe_published_count === 0) {
+      step5.status = "error";
     } else {
-      console.log("[4/4] 📧 이메일 발송 중...");
+      step5.status = "ok";
+    }
+
+    if (data.errors.length > 0) {
+      errors.push(
+        ...data.errors.map((error) => `[step4_publish_naver_cafe] ${error}`),
+      );
+    }
+
+    step5.duration_seconds = Math.round((Date.now() - step4StartedAt) / 1000);
+    console.log(
+      `[4/5] ✅ 네이버 카페 발행 요약 - ${step5.naver_cafe_published_count}/${step5.naver_cafe_published_count + step5.naver_cafe_failed_count} (소요: ${step5.duration_seconds}s)`,
+    );
+  } catch (error) {
+    step5.status = "error";
+    step5.duration_seconds = Math.round((Date.now() - step4StartedAt) / 1000);
+    const message = toErrorMessage(error);
+    errors.push(`[step4_publish_naver_cafe] ${message}`);
+    console.error(`[pipeline] step4(네이버 카페) 실패: ${message}`);
+  }
+
+  // [5/5] 이메일 발송 (대표님 메일 + 티스토리)
+  const step5StartedAt = Date.now();
+  try {
+    if (skipEmail) {
+      console.log("[5/5] ⏭️ skip_email=true 설정으로 이메일 단계를 건너뜁니다.");
+      step4.status = "skipped";
+      step4.duration_seconds = Math.round((Date.now() - step5StartedAt) / 1000);
+    } else {
+      console.log("[5/5] 📧 이메일 발송 중...");
       const tistoryCandidates = await getPendingTistoryContents();
       const data = await runEmailStep();
 
@@ -232,26 +290,26 @@ export async function GET(request: NextRequest) {
         step4.status = "skipped";
         step4.emails_sent_count = 0;
         step4.emails_failed_count = 0;
-        step4.duration_seconds = Math.round((Date.now() - step4StartedAt) / 1000);
+        step4.duration_seconds = Math.round((Date.now() - step5StartedAt) / 1000);
         console.log(
-          `[4/4] ⏭️ 이메일 발송 대상이 없어 건너뜀 (소요: ${step4.duration_seconds}s)`,
+          `[5/5] ⏭️ 이메일 발송 대상이 없어 건너뜀 (소요: ${step4.duration_seconds}s)`,
         );
       } else {
         step4.status = "ok";
         step4.emails_sent_count = data.emails_sent_count ?? 0;
         step4.emails_failed_count = data.emails_failed_count ?? 0;
         if ((data.errors.length ?? 0) > 0) {
-          errors.push(...data.errors.map((error) => `[step4_email] ${error}`));
+          errors.push(...data.errors.map((error) => `[step5_email] ${error}`));
         }
-        step4.duration_seconds = Math.round((Date.now() - step4StartedAt) / 1000);
+        step4.duration_seconds = Math.round((Date.now() - step5StartedAt) / 1000);
         console.log(
-          `[4/4] ✅ ${step4.emails_sent_count}통 이메일 발송 완료 (소요: ${step4.duration_seconds}s)`,
+          `[5/5] ✅ ${step4.emails_sent_count}통 이메일 발송 완료 (소요: ${step4.duration_seconds}s)`,
         );
       }
 
       // 티스토리 전용 이메일 발행 (대표님 메일 발송과 독립 처리)
       if (tistoryCandidates.length > 0) {
-        console.log(`[4/4] 📨 티스토리 이메일 발행 시도: ${tistoryCandidates.length}건`);
+        console.log(`[5/5] 📨 티스토리 이메일 발행 시도: ${tistoryCandidates.length}건`);
       }
 
       for (const content of tistoryCandidates) {
@@ -269,20 +327,24 @@ export async function GET(request: NextRequest) {
     }
   } catch (error) {
     step4.status = "error";
-    step4.duration_seconds = Math.round((Date.now() - step4StartedAt) / 1000);
+    step4.duration_seconds = Math.round((Date.now() - step5StartedAt) / 1000);
     const message = toErrorMessage(error);
-    errors.push(`[step4_email] ${message}`);
-    console.error(`[pipeline] step4 실패: ${message}`);
+    errors.push(`[step5_email] ${message}`);
+    console.error(`[pipeline] step5(이메일) 실패: ${message}`);
   }
 
   const elapsedSeconds = Math.round((Date.now() - startedAt) / 1000);
-  const failedStepCount = [step1.status, step2.status, step3.status, step4.status].filter(
-    (status) => status === "error",
-  ).length;
-  const success = failedStepCount < 4;
+  const failedStepCount = [
+    step1.status,
+    step2.status,
+    step3.status,
+    step5.status,
+    step4.status,
+  ].filter((status) => status === "error").length;
+  const success = failedStepCount < 5;
 
   const summary = success
-    ? `✅ 신규 영상 ${step1.new_videos_count}개 → 콘텐츠 ${step2.total_contents_generated}개 생성 → 인스타 ${step3.instagram_published_count}건/페북 ${step3.facebook_published_count}건 발행 → 이메일 ${step4.emails_sent_count}통 발송`
+    ? `✅ 신규 영상 ${step1.new_videos_count}개 → 콘텐츠 ${step2.total_contents_generated}개 생성 → 인스타 ${step3.instagram_published_count}건/페북 ${step3.facebook_published_count}건 발행 → 카페 ${step5.naver_cafe_published_count}건 발행 → 이메일 ${step4.emails_sent_count}통 발송`
     : "❌ 모든 단계가 실패했습니다. 로그와 errors를 확인해주세요.";
 
   const responseBody: PipelineResponse = {
@@ -294,7 +356,8 @@ export async function GET(request: NextRequest) {
       step1_detect: step1,
       step2_generate: step2,
       step3_publish_meta: step3,
-      step4_email: step4,
+      step4_publish_naver_cafe: step5,
+      step5_email: step4,
     },
     summary,
     errors,
