@@ -114,12 +114,6 @@ export async function callNaverApi<T>(params: {
         .join("");
     }
 
-    const testInput = "한글";
-    const testEncoded = doubleEncodeForNaver(testInput);
-    console.log(`[naver-test] Input: ${testInput}`);
-    console.log(`[naver-test] Output: ${testEncoded}`);
-    console.log(`[naver-test] Contains %25?: ${testEncoded.includes("%25")}`);
-
     const encodedBodyString = Object.entries(params.body)
       .map(([key, value]) => {
         const keyStr = String(key); // key는 ASCII
