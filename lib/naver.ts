@@ -114,6 +114,12 @@ export async function callNaverApi<T>(params: {
         .join("");
     }
 
+    const testInput = "한글";
+    const testEncoded = doubleEncodeForNaver(testInput);
+    console.log(`[naver-test] Input: ${testInput}`);
+    console.log(`[naver-test] Output: ${testEncoded}`);
+    console.log(`[naver-test] Contains %25?: ${testEncoded.includes("%25")}`);
+
     const encodedBodyString = Object.entries(params.body)
       .map(([key, value]) => {
         const keyStr = String(key); // key는 ASCII
@@ -260,6 +266,9 @@ export async function publishNaverCafeArticle(
   const accessToken = await refreshNaverAccessToken();
   const subject = truncateSubject(input.subject);
   const contenttext = truncateContent(input.contentText);
+  const contentWithBr = contenttext
+    .replace(/\r\n/g, "\n")
+    .replace(/\n/g, "<br>");
 
   const endpoint = `https://openapi.naver.com/v1/cafe/${clubId}/menu/${menuId}/articles`;
   const data = await callNaverApi<Record<string, unknown>>({
@@ -268,7 +277,7 @@ export async function publishNaverCafeArticle(
     accessToken,
     body: {
       subject,
-      content: contenttext,
+      content: contentWithBr,
     },
   });
 
