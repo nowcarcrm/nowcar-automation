@@ -90,16 +90,41 @@ export async function callNaverApi<T>(params: {
   const init: RequestInit = { method: params.method };
 
   if (params.body) {
+    // 1) key/value percent-encoding (UTF-8 기반)
+    const encodedBodyString = Object.entries(params.body)
+      .map(([key, value]) => {
+        const keyStr = encodeURIComponent(String(key));
+        const valStr = encodeURIComponent(String(value));
+        return `${keyStr}=${valStr}`;
+      })
+      .join("&");
+
+    // 2) string -> explicit UTF-8 bytes
+    const bodyBuffer = Buffer.from(encodedBodyString, "utf-8");
+
+    // 3) headers with exact byte length
     init.headers = {
       ...(init.headers ?? {}),
       "Content-Type": "application/x-www-form-urlencoded; charset=utf-8",
+      "Content-Length": String(bodyBuffer.length),
     };
-    init.body = Object.entries(params.body)
-      .map(
-        ([key, value]) =>
-          `${encodeURIComponent(key)}=${encodeURIComponent(value)}`,
-      )
-      .join("&");
+
+    // 4) send Buffer body
+    init.body = bodyBuffer as unknown as BodyInit;
+
+    // debug logs
+    console.log(
+      "[naver-debug] Content-Type: application/x-www-form-urlencoded; charset=utf-8",
+    );
+    console.log(
+      `[naver-debug] Body encoded string: ${encodedBodyString.substring(0, 300)}`,
+    );
+    console.log(
+      `[naver-debug] Body bytes (Buffer length): ${bodyBuffer.length}`,
+    );
+    console.log(
+      `[naver-debug] Body first 50 bytes hex: ${bodyBuffer.subarray(0, 50).toString("hex")}`,
+    );
   }
 
   if (params.accessToken) {
@@ -108,14 +133,6 @@ export async function callNaverApi<T>(params: {
       Authorization: `Bearer ${params.accessToken}`,
     };
   }
-
-  const headers = (init.headers ?? {}) as Record<string, string>;
-  console.log("[naver-debug] Content-Type:", headers["Content-Type"] ?? "");
-  console.log("[naver-debug] Body raw:", init.body ?? "");
-  console.log(
-    "[naver-debug] Body bytes:",
-    Buffer.from(String(init.body ?? ""), "utf-8").length,
-  );
 
   const response = await fetch(params.endpoint, init);
   const raw = await response.text();
