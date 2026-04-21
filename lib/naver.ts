@@ -50,22 +50,30 @@ export function isNaverCafeAutoPublishEnabled(): boolean {
   return process.env.AUTO_PUBLISH_NAVER_CAFE === "true";
 }
 
+function stringifyField(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
 function normalizeNaverError(rawBody: string, status: number): string {
   try {
-    const parsed = JSON.parse(rawBody) as
-      | (NaverErrorBody & {
-          errorMessage?: string;
-          errorCode?: string | number;
-          error_code?: string | number;
-        })
-      | null;
+    const parsed = JSON.parse(rawBody) as Record<string, unknown> | null;
     const extractedMessage =
-      parsed?.errorMessage ??
-      parsed?.error_description ??
-      parsed?.message ??
-      parsed?.error ??
-      JSON.stringify(parsed);
-    const errorCode = parsed?.errorCode ?? parsed?.error_code ?? "";
+      stringifyField(parsed?.errorMessage) ||
+      stringifyField(parsed?.error_description) ||
+      stringifyField(parsed?.message) ||
+      stringifyField(parsed?.error) ||
+      (parsed ? JSON.stringify(parsed) : rawBody);
+    const errorCode =
+      stringifyField(parsed?.errorCode) ||
+      stringifyField(parsed?.error_code) ||
+      "";
     const codeStr = errorCode ? ` [errorCode=${errorCode}]` : "";
     return `Naver API 오류(HTTP ${status})${codeStr}: ${extractedMessage}`;
   } catch {
