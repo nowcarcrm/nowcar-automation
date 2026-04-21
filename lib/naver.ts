@@ -52,10 +52,22 @@ export function isNaverCafeAutoPublishEnabled(): boolean {
 
 function normalizeNaverError(rawBody: string, status: number): string {
   try {
-    const parsed = JSON.parse(rawBody) as NaverErrorBody;
-    const message =
-      parsed.error_description ?? parsed.message ?? parsed.error ?? rawBody;
-    return `Naver API 오류(HTTP ${status}): ${message}`;
+    const parsed = JSON.parse(rawBody) as
+      | (NaverErrorBody & {
+          errorMessage?: string;
+          errorCode?: string | number;
+          error_code?: string | number;
+        })
+      | null;
+    const extractedMessage =
+      parsed?.errorMessage ??
+      parsed?.error_description ??
+      parsed?.message ??
+      parsed?.error ??
+      JSON.stringify(parsed);
+    const errorCode = parsed?.errorCode ?? parsed?.error_code ?? "";
+    const codeStr = errorCode ? ` [errorCode=${errorCode}]` : "";
+    return `Naver API 오류(HTTP ${status})${codeStr}: ${extractedMessage}`;
   } catch {
     return `Naver API 오류(HTTP ${status}): ${rawBody}`;
   }
@@ -205,7 +217,11 @@ export async function publishNaverCafeArticle(
     method: "POST",
     endpoint,
     accessToken,
-    body: { subject, contenttext },
+    body: {
+      subject,
+      contenttext,
+      openyn: "false",
+    },
   });
 
   // 요청사항: 응답 구조 파악용 성공 raw 로그
