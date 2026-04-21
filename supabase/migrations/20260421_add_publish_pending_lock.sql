@@ -1,8 +1,9 @@
 -- =========================================================
 -- social_publishes race-condition lock migration
 -- 실행 전 안내:
---   1) "중복 정리 SQL"을 먼저 실행해 (video_id, platform) 중복을 soft delete 처리
---   2) 이 마이그레이션 SQL을 실행
+--   1) updated_at 컬럼 추가/초기화
+--   2) 별도 제공한 "중복 정리 SQL" 실행 (video_id, platform 중복 soft delete)
+--   3) unique partial index 생성
 -- =========================================================
 
 -- 1) updated_at 컬럼 보강 (TTL 기준 시각)
@@ -10,7 +11,7 @@ alter table if exists public.social_publishes
   add column if not exists updated_at timestamptz not null default now();
 
 update public.social_publishes
-set updated_at = coalesce(updated_at, created_at, now())
+set updated_at = created_at
 where updated_at is null;
 
 -- 2) status 체크 제약 보강 (pending/success/failed)
