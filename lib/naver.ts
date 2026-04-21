@@ -227,8 +227,7 @@ export async function publishNaverCafeArticle(
     accessToken,
     body: {
       subject,
-      contenttext,
-      openyn: "false",
+      content: contenttext,
     },
   });
 
