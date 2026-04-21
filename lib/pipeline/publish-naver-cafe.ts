@@ -40,12 +40,18 @@ function buildCafeSubject(contentTitle: string | null, videoTitle: string): stri
 }
 
 function buildCafeBody(contentBody: string, videoUrl: string | null): string {
+  const hashtags =
+    "#신차장기렌트 #장기렌트 #리스 #신차리스 #법인리스 #개인리스 #즉시출고 #신차프로모션 #신차할인 #장기렌트견적 #리스견적 #국산차장기렌트 #수입차리스 #나우카";
+
   const withVideoLink = videoUrl
     ? `${contentBody.trim()}\n\n🎬 영상 보기: ${videoUrl}`
     : contentBody.trim();
-  return withVideoLink.length > 10000
-    ? withVideoLink.slice(0, 10000).trimEnd()
-    : withVideoLink;
+
+  const withHashtags = `${withVideoLink}\n\n🔖 태그\n${hashtags}`;
+
+  return withHashtags.length > 10000
+    ? withHashtags.slice(0, 10000).trimEnd()
+    : withHashtags;
 }
 
 async function recordNaverCafePublish(input: {
