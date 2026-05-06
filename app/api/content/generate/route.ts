@@ -10,7 +10,11 @@ import {
   updateVideoTranscript,
   type ChannelType,
 } from "@/lib/supabase";
-import { transcribeFromStoragePath } from "@/lib/whisper";
+import {
+  transcribeFromBuffer,
+  transcribeFromStoragePath,
+} from "@/lib/whisper";
+import { downloadYouTubeVideo } from "@/lib/storage";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -128,18 +132,33 @@ export async function GET() {
       console.log(`[content/generate] 영상 처리 시작: ${video.title} (${video.video_id})`);
       const channelResults = createDefaultChannelResult();
 
-      // 1) transcript 길이 점검. 자막이 부실(쇼츠 description fallback 등)하고
-      //    storage_path 가 있으면 Whisper STT 로 음성을 받아 보강한다.
+      // 1) transcript 길이 점검. 자막이 부실(쇼츠 description fallback 등)이면
+      //    Whisper STT 로 영상 음성을 받아 보강한다.
+      //    - storage_path 가 있으면 supabase storage 에서 다운로드 (빠름)
+      //    - 없으면 (다운로드 워커가 아직 처리 못 한 흔한 race) ytdl-core 로 직접 다운로드
       let baseText = video.transcript?.trim() ?? "";
 
-      if (baseText.length < TRANSCRIPT_MIN_CHARS && video.storage_path) {
+      if (baseText.length < TRANSCRIPT_MIN_CHARS) {
         console.log(
           `[content/generate] transcript 부족(${baseText.length}자) → Whisper STT 시도: ${video.title}`,
         );
         try {
-          const { text: sttText } = await transcribeFromStoragePath(
-            video.storage_path,
-          );
+          let sttText: string;
+          if (video.storage_path) {
+            ({ text: sttText } = await transcribeFromStoragePath(
+              video.storage_path,
+            ));
+          } else {
+            console.log(
+              `[content/generate] storage_path 없음 → ytdl-core 로 직접 다운로드: ${video.video_id}`,
+            );
+            const buffer = await downloadYouTubeVideo(video.video_id);
+            ({ text: sttText } = await transcribeFromBuffer(
+              buffer,
+              `${video.video_id}.mp4`,
+            ));
+          }
+
           baseText = sttText;
           try {
             await updateVideoTranscript(video.id, sttText);
