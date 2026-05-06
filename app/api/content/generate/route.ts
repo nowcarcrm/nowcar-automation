@@ -7,8 +7,10 @@ import {
   getUnprocessedVideos,
   markVideoProcessed,
   saveGeneratedContents,
+  updateVideoTranscript,
   type ChannelType,
 } from "@/lib/supabase";
+import { transcribeFromStoragePath } from "@/lib/whisper";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -46,6 +48,9 @@ const CHANNEL_TYPES: ChannelType[] = [
 ];
 const CTA_REQUIRED_TOKENS = ["www.나우카.com", "초대박신차의성지", "유튜브"] as const;
 const MAX_CTA_RETRY = 2;
+// transcript 가 이 임계값보다 짧으면 description fallback 으로 채워진 것이므로
+// Whisper STT 로 영상 음성을 직접 받아 보강한다.
+const TRANSCRIPT_MIN_CHARS = 200;
 
 function toErrorMessage(error: unknown): string {
   if (error instanceof Error) {
@@ -123,9 +128,45 @@ export async function GET() {
       console.log(`[content/generate] 영상 처리 시작: ${video.title} (${video.video_id})`);
       const channelResults = createDefaultChannelResult();
 
-      // 자막이 비어있으면 설명으로 대체해 생성 입력을 보장
-      const baseText =
-        video.transcript?.trim() || video.description?.trim() || video.title;
+      // 1) transcript 길이 점검. 자막이 부실(쇼츠 description fallback 등)하고
+      //    storage_path 가 있으면 Whisper STT 로 음성을 받아 보강한다.
+      let baseText = video.transcript?.trim() ?? "";
+
+      if (baseText.length < TRANSCRIPT_MIN_CHARS && video.storage_path) {
+        console.log(
+          `[content/generate] transcript 부족(${baseText.length}자) → Whisper STT 시도: ${video.title}`,
+        );
+        try {
+          const { text: sttText } = await transcribeFromStoragePath(
+            video.storage_path,
+          );
+          baseText = sttText;
+          try {
+            await updateVideoTranscript(video.id, sttText);
+          } catch (updateError) {
+            const updateMsg =
+              updateError instanceof Error
+                ? updateError.message
+                : String(updateError);
+            console.warn(
+              `[content/generate] transcript DB 업데이트 실패(진행은 계속): ${updateMsg}`,
+            );
+          }
+          console.log(
+            `[content/generate] Whisper STT 완료: ${sttText.length}자`,
+          );
+        } catch (sttError) {
+          const sttMsg =
+            sttError instanceof Error ? sttError.message : String(sttError);
+          console.error(`[content/generate] Whisper STT 실패: ${sttMsg}`);
+          errors.push(`[video_id=${video.video_id}] STT 실패: ${sttMsg}`);
+        }
+      }
+
+      // 2) 그래도 비어있으면 description → title 순으로 최종 fallback
+      if (!baseText.trim()) {
+        baseText = video.description?.trim() || video.title;
+      }
 
       const settledResults = await Promise.allSettled(
         CHANNEL_TYPES.map(async (channelType) => {

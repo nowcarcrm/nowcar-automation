@@ -98,6 +98,20 @@ export async function markVideoProcessed(videoId: string): Promise<void> {
   }
 }
 
+export async function updateVideoTranscript(
+  videoId: string,
+  transcript: string,
+): Promise<void> {
+  const { error } = await supabase
+    .from("youtube_videos")
+    .update({ transcript })
+    .eq("id", videoId);
+
+  if (error) {
+    throw new Error(`[supabase] transcript 업데이트 실패: ${error.message}`);
+  }
+}
+
 export async function saveGeneratedContents(
   contents: GeneratedContentInsert[],
 ): Promise<GeneratedContent[]> {
