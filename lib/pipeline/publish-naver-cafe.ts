@@ -29,9 +29,19 @@ type ContentRow = {
   body: string;
 };
 
+type SocialPublishStatus = "pending" | "success" | "failed";
+
 function toErrorMessage(error: unknown): string {
   if (error instanceof Error) return error.message;
   return String(error);
+}
+
+function getPendingTtlMinutes(): number {
+  const raw = process.env.PUBLISH_PENDING_TTL_MINUTES;
+  if (!raw) return 10;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) return 10;
+  return Math.floor(parsed);
 }
 
 function buildCafeSubject(contentTitle: string | null, videoTitle: string): string {
@@ -54,34 +64,58 @@ function buildCafeBody(contentBody: string, videoUrl: string | null): string {
     : withHashtags;
 }
 
-async function recordNaverCafePublish(input: {
+async function tryAcquireNaverCafePendingLock(params: {
+  videoId: string;
+  captionPreview: string | null;
+}): Promise<boolean> {
+  const supabase = createAdminClient();
+  const nowIso = new Date().toISOString();
+  const { error } = await supabase.from("social_publishes").insert({
+    video_id: params.videoId,
+    platform: "naver_cafe",
+    status: "pending" as SocialPublishStatus,
+    external_id: null,
+    storage_path: null,
+    caption_preview: params.captionPreview,
+    error_message: null,
+    created_at: nowIso,
+    updated_at: nowIso,
+    deleted_at: null,
+  });
+
+  if (!error) return true;
+
+  if ((error as { code?: string }).code === "23505") {
+    return false;
+  }
+
+  throw new Error(`pending 선점 실패: ${error.message}`);
+}
+
+async function updateNaverCafePendingToFinal(params: {
   videoId: string;
   status: "success" | "failed";
   externalId: string | null;
-  captionPreview: string | null;
   errorMessage: string | null;
+  captionPreview: string | null;
 }): Promise<void> {
-  try {
-    const supabase = createAdminClient();
-    const { error } = await supabase.from("social_publishes").insert({
-      video_id: input.videoId,
-      platform: "naver_cafe",
-      status: input.status,
-      external_id: input.externalId,
-      storage_path: null,
-      caption_preview: input.captionPreview,
-      error_message: input.errorMessage,
-    });
+  const supabase = createAdminClient();
+  const { error } = await supabase
+    .from("social_publishes")
+    .update({
+      status: params.status,
+      external_id: params.externalId,
+      error_message: params.errorMessage,
+      caption_preview: params.captionPreview,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("video_id", params.videoId)
+    .eq("platform", "naver_cafe")
+    .eq("status", "pending")
+    .is("deleted_at", null);
 
-    if (error) {
-      console.error(
-        `[publish-naver-cafe] social_publishes 기록 실패: ${error.message}`,
-      );
-    }
-  } catch (error) {
-    console.error(
-      `[publish-naver-cafe] social_publishes 기록 중 예외: ${toErrorMessage(error)}`,
-    );
+  if (error) {
+    throw new Error(`pending -> ${params.status} 상태 업데이트 실패: ${error.message}`);
   }
 }
 
@@ -102,6 +136,7 @@ export async function runPublishNaverCafeStep(): Promise<PublishNaverCafeResult>
     return result;
   }
 
+  const pendingTtlMinutes = getPendingTtlMinutes();
   const supabase = createAdminClient();
 
   const { data: videos, error: videosError } = await supabase
@@ -122,13 +157,18 @@ export async function runPublishNaverCafeStep(): Promise<PublishNaverCafeResult>
 
   result.processed_videos_count = videos.length;
 
+  // 이미 success 거나, TTL 내 pending 인 (video_id, naver_cafe) 조합 → 중복 발행 방지
   const videoIds = videos.map((v) => v.video_id);
+  const pendingCutoff = new Date(
+    Date.now() - pendingTtlMinutes * 60_000,
+  ).toISOString();
   const { data: publishedRows, error: publishedError } = await supabase
     .from("social_publishes")
-    .select("video_id, platform, status")
+    .select("video_id, status, updated_at")
     .in("video_id", videoIds)
     .eq("platform", "naver_cafe")
-    .eq("status", "success");
+    .is("deleted_at", null)
+    .in("status", ["success", "pending"]);
 
   if (publishedError) {
     console.warn(
@@ -136,10 +176,19 @@ export async function runPublishNaverCafeStep(): Promise<PublishNaverCafeResult>
     );
   }
 
-  const alreadySuccess = new Set((publishedRows ?? []).map((row) => row.video_id));
+  const alreadyBlocked = new Set<string>(
+    (publishedRows ?? [])
+      .filter((r) => {
+        if (r.status === "success") return true;
+        const updatedAt = (r as { updated_at?: string | null }).updated_at;
+        if (!updatedAt) return false;
+        return updatedAt >= pendingCutoff;
+      })
+      .map((r) => r.video_id),
+  );
 
   for (const video of videos as VideoRow[]) {
-    if (alreadySuccess.has(video.video_id)) {
+    if (alreadyBlocked.has(video.video_id)) {
       result.naver_cafe_skipped_count += 1;
       continue;
     }
@@ -172,6 +221,29 @@ export async function runPublishNaverCafeStep(): Promise<PublishNaverCafeResult>
 
     const subject = buildCafeSubject(content.title, video.title);
     const contentText = buildCafeBody(content.body, video.video_url);
+    const captionPreview = contentText.slice(0, 200);
+
+    let lockAcquired = false;
+    try {
+      lockAcquired = await tryAcquireNaverCafePendingLock({
+        videoId: video.video_id,
+        captionPreview,
+      });
+    } catch (lockError) {
+      const msg = toErrorMessage(lockError);
+      console.error(`[publish-naver-cafe] ❌ pending lock 선점 예외: ${msg}`);
+      result.errors.push(`[naver_cafe][${video.video_id}] ${msg}`);
+      result.naver_cafe_failed_count += 1;
+      continue;
+    }
+
+    if (!lockAcquired) {
+      console.log(
+        `[publish-naver-cafe] ⏭ skip: video_id=${video.video_id}, reason=pending/success lock exists`,
+      );
+      result.naver_cafe_skipped_count += 1;
+      continue;
+    }
 
     try {
       const publishResult = await publishNaverCafeArticle({
@@ -181,23 +253,23 @@ export async function runPublishNaverCafeStep(): Promise<PublishNaverCafeResult>
 
       if (publishResult.success) {
         result.naver_cafe_published_count += 1;
-        await recordNaverCafePublish({
+        await updateNaverCafePendingToFinal({
           videoId: video.video_id,
           status: "success",
           externalId: publishResult.externalId ?? null,
-          captionPreview: contentText.slice(0, 200),
           errorMessage: null,
+          captionPreview,
         });
       } else {
         result.naver_cafe_failed_count += 1;
         const msg = publishResult.errorMessage ?? "알 수 없는 발행 실패";
         result.errors.push(`[naver_cafe][${video.video_id}] ${msg}`);
-        await recordNaverCafePublish({
+        await updateNaverCafePendingToFinal({
           videoId: video.video_id,
           status: "failed",
           externalId: null,
-          captionPreview: contentText.slice(0, 200),
           errorMessage: msg,
+          captionPreview,
         });
       }
     } catch (error) {
@@ -217,13 +289,19 @@ export async function runPublishNaverCafeStep(): Promise<PublishNaverCafeResult>
       result.errors.push(`[naver_cafe][${video.video_id}] ${msg}`);
       result.naver_cafe_failed_count += 1;
 
-      await recordNaverCafePublish({
-        videoId: video.video_id,
-        status: "failed",
-        externalId: null,
-        captionPreview: contentText.slice(0, 200),
-        errorMessage: msg,
-      });
+      try {
+        await updateNaverCafePendingToFinal({
+          videoId: video.video_id,
+          status: "failed",
+          externalId: null,
+          errorMessage: msg,
+          captionPreview,
+        });
+      } catch (updateError) {
+        console.error(
+          `[publish-naver-cafe] pending → failed 업데이트 실패: ${toErrorMessage(updateError)}`,
+        );
+      }
     }
   }
 
