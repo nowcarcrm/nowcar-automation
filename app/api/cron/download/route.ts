@@ -5,10 +5,13 @@ import { createAdminClient, downloadAndUploadShort } from "@/lib/storage";
  * ============================================================
  * /api/cron/download
  * ------------------------------------------------------------
- * 평일(월~금) 09:00~18:00 KST 매시 정각(= UTC 0:00~9:00) 에 Vercel Cron
- * 이 자동 호출. 로컬 워커(C:\nowcar-worker\worker.js)와 동일한 책임을
- * Vercel 서버에서 수행한다. PC 가 꺼져 있어도 인스타/페북 자동 발행이
- * 끊기지 않게 하기 위함.
+ * 매일 19:00 KST(= 10:00 UTC) Vercel Cron 이 자동 호출. 로컬 워커
+ * (C:\nowcar-worker\worker.js)와 동일한 책임을 Vercel 서버에서 수행한다.
+ * PC 가 꺼져 있어도 인스타/페북 자동 발행이 끊기지 않게 하기 위함.
+ *
+ * Hobby 플랜은 cron 이 1일 1회만 허용되므로 일 1회 스케줄.
+ * 영상 등록 시각(보통 17:40 KST/08:40 UTC)을 지나친 19:00 KST 에 실행
+ * → 같은 날 cleanup(03:00 KST/18:00 UTC) 이전에 IG/FB 발행 가능.
  *
  * 동작:
  *   1) CRON_SECRET 헤더 검증 (외부 오남용 차단)
@@ -19,9 +22,8 @@ import { createAdminClient, downloadAndUploadShort } from "@/lib/storage";
  *   4) 실패 시 download_attempts++ 와 download_error 저장
  *
  * 시간 예산:
- *   - Vercel maxDuration 300s
  *   - 영상 1개당 다운로드+업로드 평균 30~60s 가정 → BATCH_SIZE 2 로 제한
- *   - 다음 시간대 cron 이 남은 백로그를 가져감
+ *   - 백로그가 누적되면 ?secret= 쿼리로 수동 호출하거나 로컬 워커 가동
  * ============================================================
  */
 

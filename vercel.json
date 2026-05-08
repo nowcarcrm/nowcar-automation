@@ -7,7 +7,7 @@
     },
     {
       "path": "/api/cron/download",
-      "schedule": "0 0-9 * * 1-5"
+      "schedule": "0 10 * * *"
     }
   ],
   "functions": {
