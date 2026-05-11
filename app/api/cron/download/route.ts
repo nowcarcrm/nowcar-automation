@@ -1,5 +1,6 @@
 import { after, NextRequest, NextResponse } from "next/server";
 import { createAdminClient, downloadAndUploadShort } from "@/lib/storage";
+import { runDetectStep } from "@/lib/pipeline/detect";
 
 /**
  * ============================================================
@@ -15,13 +16,16 @@ import { createAdminClient, downloadAndUploadShort } from "@/lib/storage";
  *
  * 동작:
  *   1) CRON_SECRET 헤더 검증 (외부 오남용 차단)
- *   2) youtube_videos 에서 storage_path IS NULL & download_attempts<MAX
- *      대상 조회 (created_at 오름차순)
- *   3) 각 영상에 대해 ytdl-core 로 다운로드 → Supabase Storage 업로드
+ *   2) YouTube 신규 영상 detect → DB에 행 삽입(storage_path=null).
+ *      PC OFF 상태에서도 cron 만으로 신규 영상 수집이 가능해진다.
+ *   3) youtube_videos 에서 storage_path IS NULL & download_attempts<MAX
+ *      대상 조회 (created_at 오름차순). 방금 detect 한 행도 함께 포함된다.
+ *   4) 각 영상에 대해 ytdl-core 로 다운로드 → Supabase Storage 업로드
  *      → youtube_videos.storage_path / downloaded_at 갱신
- *   4) 실패 시 download_attempts++ 와 download_error 저장
- *   5) 응답 직후 `after()` 로 /api/pipeline/run 을 트리거 →
+ *   5) 실패 시 download_attempts++ 와 download_error/last_download_error 저장
+ *   6) 응답 직후 `after()` 로 /api/pipeline/run 을 트리거 →
  *      발행/카페/메일 파이프라인을 같은 Vercel 환경에서 이어 실행한다.
+ *      이 시점에는 storage_path 가 채워져 있어 IG/FB 도 같은 사이클에 발행된다.
  *      (Hobby 플랜에서 추가 cron 없이 PC OFF 상태로도 자동 발행 가능)
  *
  * 시간 예산:
@@ -206,7 +210,24 @@ async function handleDownload(req: NextRequest): Promise<NextResponse> {
   }
   console.log("[cron/download] ✅ 인증 통과");
 
-  // 2) 처리 대상 조회
+  // 2) 신규 영상 detect — DB 에 행 삽입(storage_path=null).
+  //    실패해도 기존 pending 다운로드는 계속 진행한다.
+  try {
+    const detect = await runDetectStep();
+    console.log(
+      `[cron/download] 🔍 detect: 신규 ${detect.new_videos_count}건, 기존 ${detect.existing_videos_count}건`,
+    );
+    if (detect.errors.length > 0) {
+      console.warn(
+        `[cron/download] ⚠️ detect 부분 실패: ${detect.errors.join(" | ")}`,
+      );
+    }
+  } catch (error) {
+    const msg = toErrorMessage(error);
+    console.warn(`[cron/download] ⚠️ detect 단계 실패(진행은 계속): ${msg}`);
+  }
+
+  // 3) 처리 대상 조회
   let pending: PendingVideo[] = [];
   try {
     pending = await fetchPendingVideos();
