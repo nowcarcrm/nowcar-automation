@@ -125,11 +125,16 @@ async function markFailed(
   prevAttempts: number | null,
 ): Promise<void> {
   const supabase = createAdminClient();
+  const truncated = errorMessage.slice(0, 500);
+  // download_error 는 다음 성공 시 클리어되지만 last_download_error 는 영구 보존.
+  // Hobby 의 1시간 로그 보존을 우회해 주말 실패 사유를 다음 영업일에도 진단하기 위함.
   const { error } = await supabase
     .from("youtube_videos")
     .update({
       download_attempts: (prevAttempts ?? 0) + 1,
-      download_error: errorMessage.slice(0, 500),
+      download_error: truncated,
+      last_download_error: truncated,
+      last_download_error_at: new Date().toISOString(),
     })
     .eq("id", videoUuid);
 
