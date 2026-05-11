@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from "next/server";
+import { after, NextRequest, NextResponse } from "next/server";
 import { createAdminClient, downloadAndUploadShort } from "@/lib/storage";
 
 /**
@@ -20,6 +20,9 @@ import { createAdminClient, downloadAndUploadShort } from "@/lib/storage";
  *   3) 각 영상에 대해 ytdl-core 로 다운로드 → Supabase Storage 업로드
  *      → youtube_videos.storage_path / downloaded_at 갱신
  *   4) 실패 시 download_attempts++ 와 download_error 저장
+ *   5) 응답 직후 `after()` 로 /api/pipeline/run 을 트리거 →
+ *      발행/카페/메일 파이프라인을 같은 Vercel 환경에서 이어 실행한다.
+ *      (Hobby 플랜에서 추가 cron 없이 PC OFF 상태로도 자동 발행 가능)
  *
  * 시간 예산:
  *   - 영상 1개당 다운로드+업로드 평균 30~60s 가정 → BATCH_SIZE 2 로 제한
@@ -122,11 +125,16 @@ async function markFailed(
   prevAttempts: number | null,
 ): Promise<void> {
   const supabase = createAdminClient();
+  const truncated = errorMessage.slice(0, 500);
+  // download_error 는 다음 성공 시 클리어되지만 last_download_error 는 영구 보존.
+  // Hobby 의 1시간 로그 보존을 우회해 주말 실패 사유를 다음 영업일에도 진단하기 위함.
   const { error } = await supabase
     .from("youtube_videos")
     .update({
       download_attempts: (prevAttempts ?? 0) + 1,
-      download_error: errorMessage.slice(0, 500),
+      download_error: truncated,
+      last_download_error: truncated,
+      last_download_error_at: new Date().toISOString(),
     })
     .eq("id", videoUuid);
 
@@ -134,6 +142,46 @@ async function markFailed(
     console.warn(
       `[cron/download] 실패 기록 중 에러(진행은 계속): ${error.message}`,
     );
+  }
+}
+
+/**
+ * 응답 직후 호출되어 `/api/pipeline/run` 을 같은 배포의 별도 invocation 으로
+ * 시작시킨다. 새 invocation 은 자체 maxDuration(300s) 을 가지므로 본 다운로드
+ * cron 의 남은 시간 예산에 영향을 받지 않는다.
+ *
+ * 짧은 AbortSignal 로 클라이언트 fetch 만 끊고 빠진다 — Vercel 측 함수는
+ * 요청을 이미 받아 실행 중이므로 파이프라인은 끝까지 돈다.
+ */
+async function triggerPipeline(req: NextRequest): Promise<void> {
+  const host = process.env.VERCEL_URL ?? req.headers.get("host");
+  if (!host) {
+    console.warn("[cron/download] ⚠️ 파이프라인 트리거 스킵: host 정보 없음");
+    return;
+  }
+  const protocol = process.env.VERCEL_URL ? "https" : "http";
+  const url = `${protocol}://${host}/api/pipeline/run`;
+
+  try {
+    const res = await fetch(url, {
+      method: "GET",
+      signal: AbortSignal.timeout(5_000),
+    });
+    console.log(
+      `[cron/download] 🔁 파이프라인 트리거 응답 수신: HTTP ${res.status}`,
+    );
+  } catch (err) {
+    if (
+      err instanceof Error &&
+      (err.name === "TimeoutError" || err.name === "AbortError")
+    ) {
+      console.log(
+        "[cron/download] 🔁 파이프라인 트리거 송신 완료(응답 대기 생략)",
+      );
+    } else {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`[cron/download] ⚠️ 파이프라인 트리거 실패: ${msg}`);
+    }
   }
 }
 
@@ -190,6 +238,9 @@ async function handleDownload(req: NextRequest): Promise<NextResponse> {
       failures: [],
       errors: [],
     };
+    // 다운로드할 게 없어도 파이프라인은 돌려야 한다.
+    // 어제 다운로드 완료된 영상의 IG/FB/카페/메일 발행이 아직 남아 있을 수 있음.
+    after(() => triggerPipeline(req));
     return NextResponse.json(responseBody);
   }
 
@@ -235,6 +286,8 @@ async function handleDownload(req: NextRequest): Promise<NextResponse> {
     errors,
   };
 
+  // 응답 송신 후 파이프라인 발행 단계 트리거.
+  after(() => triggerPipeline(req));
   return NextResponse.json(responseBody);
 }
 
