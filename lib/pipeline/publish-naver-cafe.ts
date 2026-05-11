@@ -158,16 +158,17 @@ export async function runPublishNaverCafeStep(): Promise<PublishNaverCafeResult>
   result.processed_videos_count = videos.length;
 
   // 이미 success 거나, TTL 내 pending 인 (video_id, naver_cafe) 조합 → 중복 발행 방지
+  //   deleted_at 필터를 적용하지 않는 이유는 publish-meta 와 동일:
+  //   cleanup 으로 storage 파일이 사라져도 "발행 성공" 사실은 그대로 유지되어야 한다.
   const videoIds = videos.map((v) => v.video_id);
   const pendingCutoff = new Date(
     Date.now() - pendingTtlMinutes * 60_000,
   ).toISOString();
   const { data: publishedRows, error: publishedError } = await supabase
     .from("social_publishes")
-    .select("video_id, status, updated_at")
+    .select("video_id, status, updated_at, deleted_at")
     .in("video_id", videoIds)
     .eq("platform", "naver_cafe")
-    .is("deleted_at", null)
     .in("status", ["success", "pending"]);
 
   if (publishedError) {
