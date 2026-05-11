@@ -1,6 +1,58 @@
 import ytdl from "@distube/ytdl-core";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
+/* ------------------------------------------------------------
+ * YouTube 봇 차단 우회용 cookie agent
+ * ------------------------------------------------------------
+ * Vercel 같은 데이터센터 IP 에서 ytdl 을 호출하면 YouTube 가
+ * "Sign in to confirm you're not a bot" 으로 차단한다.
+ * 로그인된 브라우저의 쿠키 JSON 을 env(YOUTUBE_COOKIES) 로 받아
+ * @distube/ytdl-core 의 createAgent 에 넣어 우회한다.
+ *
+ * 쿠키 추출 방법:
+ *   1) Chrome 에 "Get cookies.txt LOCALLY" 또는 "Cookie-Editor" 확장 설치
+ *   2) youtube.com 에 로그인된 상태에서 쿠키를 JSON 으로 export
+ *   3) JSON 배열 그대로 Vercel 환경변수 YOUTUBE_COOKIES 에 넣기
+ *      (한 줄로 minified 해서 넣는 것이 안전)
+ *   4) 만료 시 다시 갱신 — 보통 수주~수개월 유지됨
+ *
+ * 캐싱: agent 생성은 약간 비용이 있으므로 모듈 레벨에 캐싱.
+ * ---------------------------------------------------------- */
+
+type YtdlAgent = ReturnType<typeof ytdl.createAgent>;
+let cachedYouTubeAgent: YtdlAgent | null | undefined;
+
+function getYouTubeAgent(): YtdlAgent | undefined {
+  if (cachedYouTubeAgent !== undefined) {
+    return cachedYouTubeAgent ?? undefined;
+  }
+
+  const raw = process.env.YOUTUBE_COOKIES?.trim();
+  if (!raw) {
+    cachedYouTubeAgent = null;
+    return undefined;
+  }
+
+  try {
+    const cookies = JSON.parse(raw);
+    if (!Array.isArray(cookies)) {
+      throw new Error("YOUTUBE_COOKIES 는 JSON 배열이어야 합니다.");
+    }
+    cachedYouTubeAgent = ytdl.createAgent(cookies);
+    console.log(
+      `[storage] 🍪 YouTube cookie agent 활성화 (cookie_count=${cookies.length})`,
+    );
+    return cachedYouTubeAgent;
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    console.warn(
+      `[storage] ⚠️ YOUTUBE_COOKIES 파싱 실패(쿠키 없이 진행, 봇 차단 위험): ${msg}`,
+    );
+    cachedYouTubeAgent = null;
+    return undefined;
+  }
+}
+
 /**
  * ============================================================
  * lib/storage.ts
@@ -120,8 +172,12 @@ async function withRetry<T>(
 export async function downloadYouTubeVideo(videoId: string): Promise<Buffer> {
   return withRetry(`YouTube 다운로드(${videoId})`, async () => {
     const watchUrl = `https://www.youtube.com/watch?v=${videoId}`;
+    const agent = getYouTubeAgent();
 
-    const info = await ytdl.getInfo(watchUrl);
+    const info = await ytdl.getInfo(
+      watchUrl,
+      agent ? { agent } : undefined,
+    );
 
     // 1순위: mp4 + 비디오+오디오 함께 있는 포맷(Meta 업로드에 가장 안전)
     // 2순위: mp4 비디오 only (오디오가 분리된 경우)
@@ -143,7 +199,10 @@ export async function downloadYouTubeVideo(videoId: string): Promise<Buffer> {
 
     return await new Promise<Buffer>((resolve, reject) => {
       const chunks: Buffer[] = [];
-      const stream = ytdl.downloadFromInfo(info, { format });
+      const stream = ytdl.downloadFromInfo(info, {
+        format,
+        ...(agent ? { agent } : {}),
+      });
 
       stream.on("data", (chunk: Buffer) => {
         chunks.push(chunk);
