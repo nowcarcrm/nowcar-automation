@@ -1,4 +1,8 @@
-import { createAdminClient, TEMP_VIDEOS_BUCKET } from "@/lib/storage";
+import {
+  createAdminClient,
+  downloadAndUploadShort,
+  TEMP_VIDEOS_BUCKET,
+} from "@/lib/storage";
 import {
   buildInstagramCaption,
   isFacebookAutoPublishEnabled,
@@ -48,6 +52,8 @@ export interface PublishMetaResult {
 
 /** 한 번에 처리할 최대 영상 수(백로그 폭주 방지) */
 const MAX_VIDEOS_PER_RUN = 3;
+/** download_attempts 가 이 값 이상이면 인라인 다운로드도 포기 (cron 의 MAX_ATTEMPTS 와 동일) */
+const INLINE_DOWNLOAD_MAX_ATTEMPTS = 5;
 
 type VideoRow = {
   id: string;
@@ -55,6 +61,7 @@ type VideoRow = {
   title: string;
   video_url: string | null;
   storage_path: string | null;
+  download_attempts: number | null;
 };
 
 type ContentRow = {
@@ -76,6 +83,78 @@ function getPendingTtlMinutes(): number {
   const parsed = Number(raw);
   if (!Number.isFinite(parsed) || parsed <= 0) return 10;
   return Math.floor(parsed);
+}
+
+/**
+ * storage_path 가 비어 있으면 인라인으로 다운로드/업로드 시도.
+ * Vercel cron(/api/cron/download) drift, PC-off 등으로 다운로드가 늦어져도
+ * 매 10분 사이클의 publish-meta 단계에서 자가 회복되도록 하기 위함.
+ *
+ * 반환값:
+ *   - 성공/이미 존재: 사용 가능한 storage_path
+ *   - 실패: null (호출자가 스킵)
+ */
+async function ensureVideoDownloaded(video: VideoRow): Promise<string | null> {
+  if (video.storage_path) {
+    return video.storage_path;
+  }
+
+  const attempts = video.download_attempts ?? 0;
+  if (attempts >= INLINE_DOWNLOAD_MAX_ATTEMPTS) {
+    console.warn(
+      `[publish-meta] ⏭ 인라인 다운로드 포기: video_id=${video.video_id}, attempts=${attempts}`,
+    );
+    return null;
+  }
+
+  console.log(
+    `[publish-meta] 📥 storage_path 비어있음 → 인라인 다운로드 시도: video_id=${video.video_id}, prev_attempts=${attempts}`,
+  );
+
+  const supabase = createAdminClient();
+  try {
+    const uploaded = await downloadAndUploadShort(video.video_id);
+    const { error } = await supabase
+      .from("youtube_videos")
+      .update({
+        storage_path: uploaded.path,
+        downloaded_at: new Date().toISOString(),
+        download_error: null,
+      })
+      .eq("id", video.id);
+
+    if (error) {
+      console.warn(
+        `[publish-meta] storage_path 업데이트 실패(진행은 계속): ${error.message}`,
+      );
+    }
+
+    console.log(
+      `[publish-meta] ✅ 인라인 다운로드 완료: ${uploaded.path} (${(uploaded.sizeBytes / 1024 / 1024).toFixed(2)} MB)`,
+    );
+    return uploaded.path;
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    console.error(`[publish-meta] ❌ 인라인 다운로드 실패: ${msg}`);
+
+    const truncated = msg.slice(0, 500);
+    const { error: updateError } = await supabase
+      .from("youtube_videos")
+      .update({
+        download_attempts: attempts + 1,
+        download_error: truncated,
+        last_download_error: truncated,
+        last_download_error_at: new Date().toISOString(),
+      })
+      .eq("id", video.id);
+
+    if (updateError) {
+      console.warn(
+        `[publish-meta] 다운로드 실패 기록도 실패(진행은 계속): ${updateError.message}`,
+      );
+    }
+    return null;
+  }
 }
 
 async function cleanupStalePendingPublishes(
@@ -198,7 +277,7 @@ export async function runPublishMetaStep(): Promise<PublishMetaResult> {
   // 1) 대상 영상 조회
   const { data: videos, error: videosError } = await supabase
     .from("youtube_videos")
-    .select("id, video_id, title, video_url, storage_path")
+    .select("id, video_id, title, video_url, storage_path, download_attempts")
     .eq("processed", true)
     .order("created_at", { ascending: false })
     .limit(MAX_VIDEOS_PER_RUN);
@@ -218,15 +297,17 @@ export async function runPublishMetaStep(): Promise<PublishMetaResult> {
   );
 
   // 2) 이미 성공했거나, TTL 내 pending인 (video_id, platform) 조합 조회 → 중복 발행 방지
+  //    중요: deleted_at 은 storage 파일이 cleanup 으로 삭제됐다는 의미일 뿐
+  //    "발행 사실 자체"는 보존되어야 하므로 deleted_at 필터를 적용하지 않는다.
+  //    (없으면 24h 후 cleanup → 다음 사이클이 "안 했네" 라며 재시도 → 파일 사라져 실패)
   const videoIds = videos.map((v) => v.video_id);
   const pendingCutoff = new Date(
     Date.now() - pendingTtlMinutes * 60_000,
   ).toISOString();
   const { data: publishedRows, error: publishedError } = await supabase
     .from("social_publishes")
-    .select("video_id, platform, status, updated_at")
+    .select("video_id, platform, status, updated_at, deleted_at")
     .in("video_id", videoIds)
-    .is("deleted_at", null)
     .in("status", ["success", "pending"]);
 
   if (publishedError) {
@@ -265,6 +346,17 @@ export async function runPublishMetaStep(): Promise<PublishMetaResult> {
       if (fbEnabled) result.facebook_skipped_count += 1;
       continue;
     }
+
+    // 3.5) storage_path 가 없으면 인라인 다운로드 시도.
+    //      성공하면 video.storage_path 를 갱신해 (A)/(B) 가 그대로 사용한다.
+    const resolvedStoragePath = await ensureVideoDownloaded(video);
+    if (!resolvedStoragePath) {
+      // 다운로드 자체가 실패/한도 초과면 이번 사이클은 스킵하고 다음에 재시도
+      if (needIg) result.instagram_skipped_count += 1;
+      if (needFb) result.facebook_skipped_count += 1;
+      continue;
+    }
+    video.storage_path = resolvedStoragePath;
 
     // 4) 이 영상에 속한 generated_contents 조회
     //    → instagram 캡션/해시태그, naver_blog 본문을 가져온다.
