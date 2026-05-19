@@ -42,6 +42,8 @@ interface CleanupResponse {
   database: {
     updated_count: number;
     failed_count: number;
+    video_storage_path_reset_count: number;
+    video_storage_path_reset_failed: number;
   };
   errors: string[];
 }
@@ -117,8 +119,16 @@ async function handleCleanup(req: NextRequest): Promise<NextResponse> {
     console.error(`[cron/cleanup] ❌ Storage 삭제 전체 실패: ${msg}`);
   }
 
-  // 3) social_publishes.deleted_at 업데이트 (개별 실패해도 계속)
+  // 3) social_publishes.deleted_at + youtube_videos.storage_path 동기 리셋
+  //    (개별 실패해도 계속)
+  //
+  //    youtube_videos 리셋이 빠지면 publish-meta 가 다음 사이클에서 stale path
+  //    그대로 Meta/Threads 로 publish 시도 → 컨테이너 ERROR(URL 404) 반복.
+  //    그래서 storage 파일이 사라지는 순간 storage_path 도 NULL 로 돌려놓고,
+  //    download_attempts/download_error 도 초기화해 인라인 재다운로드가
+  //    가능하도록 한다.
   const dbUpdates = { success: 0, failed: 0 };
+  const videoResets = { success: 0, failed: 0 };
   if (deleteResult.deleted.length > 0) {
     const supabase = createAdminClient();
     const nowIso = new Date().toISOString();
@@ -143,9 +153,32 @@ async function handleCleanup(req: NextRequest): Promise<NextResponse> {
           `[cron/cleanup] ⚠️  DB 업데이트 실패(${storagePath}): ${msg}`,
         );
       }
+
+      try {
+        const { error } = await supabase
+          .from("youtube_videos")
+          .update({
+            storage_path: null,
+            download_attempts: 0,
+            download_error: null,
+          })
+          .eq("storage_path", storagePath);
+
+        if (error) {
+          throw new Error(error.message);
+        }
+        videoResets.success += 1;
+      } catch (error) {
+        videoResets.failed += 1;
+        const msg = toErrorMessage(error);
+        errors.push(`[video_reset][${storagePath}] ${msg}`);
+        console.error(
+          `[cron/cleanup] ⚠️  youtube_videos 리셋 실패(${storagePath}): ${msg}`,
+        );
+      }
     }
     console.log(
-      `[cron/cleanup] 📝 DB 업데이트 완료 - 성공 ${dbUpdates.success}, 실패 ${dbUpdates.failed}`,
+      `[cron/cleanup] 📝 DB 업데이트 완료 - social_publishes 성공 ${dbUpdates.success}/실패 ${dbUpdates.failed}, youtube_videos 리셋 성공 ${videoResets.success}/실패 ${videoResets.failed}`,
     );
   }
 
@@ -175,6 +208,8 @@ async function handleCleanup(req: NextRequest): Promise<NextResponse> {
     database: {
       updated_count: dbUpdates.success,
       failed_count: dbUpdates.failed,
+      video_storage_path_reset_count: videoResets.success,
+      video_storage_path_reset_failed: videoResets.failed,
     },
     errors,
   };
