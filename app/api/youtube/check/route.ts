@@ -91,6 +91,7 @@ export async function GET() {
           video_url: video.videoUrl,
           published_at: video.publishedAt,
           processed: false,
+          duration_seconds: video.durationSeconds,
         });
 
         newVideos.push({

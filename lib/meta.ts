@@ -28,6 +28,17 @@ import { createAdminClient } from "./storage";
 const GRAPH_API_VERSION = "v25.0";
 const GRAPH_BASE_URL = `https://graph.facebook.com/${GRAPH_API_VERSION}`;
 
+/**
+ * Threads API 는 별도 도메인을 사용한다.
+ * https://developers.facebook.com/docs/threads/posts
+ *   - container 생성: POST /{threads-user-id}/threads
+ *   - 상태 폴링:      GET /{container-id}?fields=status,error_message
+ *   - 발행:           POST /{threads-user-id}/threads_publish
+ * 캡션 한도 500자, 비디오 최대 5분.
+ */
+const THREADS_API_VERSION = "v1.0";
+const THREADS_BASE_URL = `https://graph.threads.net/${THREADS_API_VERSION}`;
+
 /* ------------------------------------------------------------
  * 공통 타입
  * ---------------------------------------------------------- */
@@ -65,9 +76,24 @@ export interface FacebookReelsPublishInput {
   recordResult?: boolean;
 }
 
+export interface ThreadsPublishInput {
+  /** 원본 유튜브 video_id (social_publishes 에 기록용) */
+  videoId: string;
+  /** Meta 서버가 접근 가능한 공개 mp4 URL (Supabase public URL) */
+  videoUrl: string;
+  /** 스레드 본문(500자 한도) */
+  caption: string;
+  /** Supabase Storage 경로 (선택, DB 기록용) */
+  storagePath?: string;
+  /** true면 내부 recordPublish 수행, false면 호출자가 상태 기록 */
+  recordResult?: boolean;
+}
+
+export type SocialPlatform = "instagram" | "facebook" | "threads";
+
 export interface PublishResult {
   success: boolean;
-  platform: "instagram" | "facebook";
+  platform: SocialPlatform;
   /** 발행 성공 시 Meta 가 돌려준 리소스 ID */
   externalId?: string;
   /** 실패 시 에러 메시지 */
@@ -102,6 +128,14 @@ function getFacebookPageAccessToken(): string {
   return getMetaAccessToken();
 }
 
+function getThreadsUserId(): string {
+  return requireEnv("THREADS_USER_ID");
+}
+
+function getThreadsAccessToken(): string {
+  return requireEnv("THREADS_ACCESS_TOKEN");
+}
+
 /** 자동 발행 ON/OFF 스위치 */
 export function isInstagramAutoPublishEnabled(): boolean {
   return process.env.AUTO_PUBLISH_INSTAGRAM === "true";
@@ -109,6 +143,10 @@ export function isInstagramAutoPublishEnabled(): boolean {
 
 export function isFacebookAutoPublishEnabled(): boolean {
   return process.env.AUTO_PUBLISH_FACEBOOK === "true";
+}
+
+export function isThreadsAutoPublishEnabled(): boolean {
+  return process.env.AUTO_PUBLISH_THREADS === "true";
 }
 
 /* ------------------------------------------------------------
@@ -176,8 +214,9 @@ async function callGraphApi<T>(
   method: "GET" | "POST",
   path: string,
   params: Record<string, string>,
+  baseUrl: string = GRAPH_BASE_URL,
 ): Promise<T> {
-  const url = new URL(`${GRAPH_BASE_URL}${path}`);
+  const url = new URL(`${baseUrl}${path}`);
 
   const init: RequestInit = { method };
   if (method === "GET") {
@@ -790,12 +829,215 @@ export async function publishFacebookPagePost(
 }
 
 /* ------------------------------------------------------------
+ * 2.5) Threads 발행 (graph.threads.net)
+ *      흐름: container 생성 → status 폴링 → threads_publish
+ * ---------------------------------------------------------- */
+
+/** 1단계: Threads 미디어 컨테이너 생성 (VIDEO) */
+async function createThreadsContainer(
+  videoUrl: string,
+  caption: string,
+): Promise<string> {
+  const userId = getThreadsUserId();
+  const accessToken = getThreadsAccessToken();
+
+  console.log(`[meta] 🧵 [1/3] Threads 컨테이너 생성 중...`);
+  console.log(`[meta]    - endpoint=/${userId}/threads (base=${THREADS_BASE_URL})`);
+  console.log(`[meta]    - video_url=${videoUrl}`);
+  console.log(`[meta]    - text_length=${caption.length}`);
+
+  const data = await callGraphApi<{ id: string }>(
+    "POST",
+    `/${userId}/threads`,
+    {
+      media_type: "VIDEO",
+      video_url: videoUrl,
+      text: caption,
+      access_token: accessToken,
+    },
+    THREADS_BASE_URL,
+  );
+
+  if (!data?.id) {
+    throw new Error("Threads 컨테이너 ID 를 응답에서 찾을 수 없습니다.");
+  }
+
+  console.log(`[meta]    - container_response=${JSON.stringify(data)}`);
+  console.log(`[meta] ✅ [1/3] Threads 컨테이너 생성 완료 - id=${data.id}`);
+  return data.id;
+}
+
+/**
+ * 2단계: 컨테이너 상태 폴링.
+ * Threads 응답 status 값: IN_PROGRESS / FINISHED / ERROR / EXPIRED / PUBLISHED.
+ */
+async function waitForThreadsContainerReady(
+  containerId: string,
+  opts: { maxWaitMs?: number; intervalMs?: number } = {},
+): Promise<void> {
+  const maxWaitMs = opts.maxWaitMs ?? 120_000; // 120초 (Threads 권장)
+  const intervalMs = opts.intervalMs ?? 5_000;
+  const accessToken = getThreadsAccessToken();
+  const start = Date.now();
+  let pollCount = 0;
+
+  console.log(
+    `[meta] ⏳ [2/3] Threads 컨테이너 상태 폴링 시작 (최대 ${maxWaitMs / 1000}초)`,
+  );
+
+  while (Date.now() - start < maxWaitMs) {
+    pollCount += 1;
+    const data = await callGraphApi<{
+      status?: string;
+      error_message?: string;
+    }>(
+      "GET",
+      `/${containerId}`,
+      {
+        fields: "status,error_message",
+        access_token: accessToken,
+      },
+      THREADS_BASE_URL,
+    );
+
+    const status = data.status ?? "UNKNOWN";
+    const elapsedSeconds = Math.round((Date.now() - start) / 1000);
+    console.log(
+      `[meta]    - poll=${pollCount}, status=${status}, elapsed=${elapsedSeconds}s, raw=${JSON.stringify(data)}`,
+    );
+
+    if (status === "FINISHED" || status === "PUBLISHED") {
+      console.log(`[meta] ✅ [2/3] Threads 컨테이너 준비 완료`);
+      return;
+    }
+
+    if (status === "ERROR" || status === "EXPIRED") {
+      throw new Error(
+        `Threads 컨테이너 처리 실패 - status=${status}, error_message=${data.error_message ?? "unknown"}`,
+      );
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+
+  throw new Error(
+    `Threads 컨테이너가 ${maxWaitMs / 1000}초 내에 FINISHED 상태가 되지 않았습니다.`,
+  );
+}
+
+/** 3단계: Threads 컨테이너 발행 */
+async function publishThreadsContainer(containerId: string): Promise<string> {
+  const userId = getThreadsUserId();
+  const accessToken = getThreadsAccessToken();
+
+  console.log(`[meta] 🚀 [3/3] Threads 발행 중...`);
+  console.log(`[meta]    - endpoint=/${userId}/threads_publish`);
+  console.log(`[meta]    - creation_id=${containerId}`);
+
+  const data = await callGraphApi<{ id: string }>(
+    "POST",
+    `/${userId}/threads_publish`,
+    {
+      creation_id: containerId,
+      access_token: accessToken,
+    },
+    THREADS_BASE_URL,
+  );
+
+  if (!data?.id) {
+    throw new Error("발행된 Threads ID 를 응답에서 찾을 수 없습니다.");
+  }
+
+  console.log(`[meta]    - publish_response=${JSON.stringify(data)}`);
+  console.log(`[meta] ✅ [3/3] Threads 발행 완료 - thread_id=${data.id}`);
+  return data.id;
+}
+
+/**
+ * Threads 포스트를 자동 발행한다.
+ *   - 실패 시 social_publishes 에 failed 로그를 남기고 Gmail 알림 전송
+ *   - 성공 시 external_id(thread_id) 기록
+ */
+export async function publishThreadsPost(
+  input: ThreadsPublishInput,
+): Promise<PublishResult> {
+  if (!isThreadsAutoPublishEnabled()) {
+    const msg = "AUTO_PUBLISH_THREADS=true 가 아니므로 스킵";
+    console.log(`[meta] ⏭  ${msg}`);
+    return { success: false, platform: "threads", errorMessage: msg };
+  }
+
+  try {
+    console.log(
+      `[meta] 🎯 Threads 발행 요청: video_id=${input.videoId}, storage_path=${input.storagePath ?? "-"}`,
+    );
+    const containerId = await createThreadsContainer(input.videoUrl, input.caption);
+    await waitForThreadsContainerReady(containerId);
+    const threadId = await publishThreadsContainer(containerId);
+
+    if (input.recordResult !== false) {
+      await recordPublish({
+        videoId: input.videoId,
+        platform: "threads",
+        status: "success",
+        externalId: threadId,
+        storagePath: input.storagePath ?? null,
+        captionPreview: input.caption.slice(0, 200),
+        errorMessage: null,
+      });
+    }
+
+    return {
+      success: true,
+      platform: "threads",
+      externalId: threadId,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`[meta] ❌ Threads 발행 실패: ${message}`);
+    console.error(`[meta] ❌ Threads error object: ${serializeUnknownError(error)}`);
+    if (error instanceof GraphApiError) {
+      console.error(
+        `[meta] ❌ Threads Graph API 에러 상세: status=${error.status}, method=${error.method}, path=${error.path}, graph_code=${error.graphCode ?? "unknown"}`,
+      );
+      console.error(`[meta] ❌ Threads Graph raw response: ${error.rawBody}`);
+    }
+
+    if (input.recordResult !== false) {
+      await recordPublish({
+        videoId: input.videoId,
+        platform: "threads",
+        status: "failed",
+        externalId: null,
+        storagePath: input.storagePath ?? null,
+        captionPreview: input.caption.slice(0, 200),
+        errorMessage: message,
+      });
+    }
+
+    await sendMetaFailureAlert({
+      platform: "threads",
+      videoId: input.videoId,
+      errorMessage: message,
+    }).catch((err) => {
+      console.error(`[meta] 알림 메일 발송도 실패: ${String(err)}`);
+    });
+
+    return {
+      success: false,
+      platform: "threads",
+      errorMessage: message,
+    };
+  }
+}
+
+/* ------------------------------------------------------------
  * 4) social_publishes DB 기록
  * ---------------------------------------------------------- */
 
 interface RecordPublishInput {
   videoId: string;
-  platform: "instagram" | "facebook";
+  platform: SocialPlatform;
   status: "pending" | "success" | "failed";
   externalId: string | null;
   storagePath: string | null;
@@ -831,7 +1073,7 @@ async function recordPublish(input: RecordPublishInput): Promise<void> {
  * ---------------------------------------------------------- */
 
 interface FailureAlertInput {
-  platform: "instagram" | "facebook";
+  platform: SocialPlatform;
   videoId: string;
   errorMessage: string;
 }
@@ -857,7 +1099,11 @@ async function sendMetaFailureAlert(input: FailureAlertInput): Promise<void> {
   });
 
   const platformLabel =
-    input.platform === "instagram" ? "인스타그램 릴스" : "페이스북 페이지";
+    input.platform === "instagram"
+      ? "인스타그램 릴스"
+      : input.platform === "facebook"
+        ? "페이스북 페이지"
+        : "스레드";
 
   const html = `
     <div style="font-family:'Malgun Gothic',Arial,sans-serif;max-width:640px;margin:0 auto;padding:20px;color:#111827;">
@@ -907,6 +1153,29 @@ export function buildInstagramCaption(
   // 해시태그는 최대한 보존하고 body 를 잘라낸다.
   const tagLen = hashtags ? hashtags.trim().length + 2 : 0;
   const bodyLimit = Math.max(0, IG_MAX - tagLen - 1);
+  const truncatedBody = body.trim().slice(0, bodyLimit).trimEnd();
+  return hashtags
+    ? `${truncatedBody}\n\n${hashtags.trim()}`
+    : truncatedBody;
+}
+
+/**
+ * generated_contents.body + hashtags 를 스레드 본문으로 합친다.
+ * 스레드 텍스트는 최대 500자.
+ */
+export function buildThreadsCaption(
+  body: string,
+  hashtags: string | null,
+): string {
+  const TH_MAX = 500;
+  const combined = hashtags
+    ? `${body.trim()}\n\n${hashtags.trim()}`
+    : body.trim();
+
+  if (combined.length <= TH_MAX) return combined;
+
+  const tagLen = hashtags ? hashtags.trim().length + 2 : 0;
+  const bodyLimit = Math.max(0, TH_MAX - tagLen - 1);
   const truncatedBody = body.trim().slice(0, bodyLimit).trimEnd();
   return hashtags
     ? `${truncatedBody}\n\n${hashtags.trim()}`
