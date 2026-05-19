@@ -5,13 +5,17 @@ import {
 } from "@/lib/storage";
 import {
   buildInstagramCaption,
+  buildThreadsCaption,
   isFacebookAutoPublishEnabled,
   isInstagramAutoPublishEnabled,
+  isThreadsAutoPublishEnabled,
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   publishFacebookPagePost,
   publishFacebookReels,
   publishInstagramReel,
+  publishThreadsPost,
 } from "@/lib/meta";
+import { getVideoDurationSeconds } from "@/lib/youtube";
 
 /**
  * ============================================================
@@ -47,6 +51,12 @@ export interface PublishMetaResult {
   facebook_failed_count: number;
   /** 페북 스킵 건수 */
   facebook_skipped_count: number;
+  /** 스레드 발행 성공 건수 */
+  threads_published_count: number;
+  /** 스레드 발행 실패 건수 */
+  threads_failed_count: number;
+  /** 스레드 스킵 건수 */
+  threads_skipped_count: number;
   errors: string[];
 }
 
@@ -54,6 +64,13 @@ export interface PublishMetaResult {
 const MAX_VIDEOS_PER_RUN = 3;
 /** download_attempts 가 이 값 이상이면 인라인 다운로드도 포기 (cron 의 MAX_ATTEMPTS 와 동일) */
 const INLINE_DOWNLOAD_MAX_ATTEMPTS = 5;
+/**
+ * IG Reels / FB Reels 짧은-폼 자동 발행 시 허용할 최대 영상 길이(초).
+ * 인스타 Reels 컨테이너는 90초 한도 안에 FINISHED 되어야 하며, 그 이상은
+ * "컨테이너가 90초 내에 FINISHED 상태가 되지 않았습니다." 오류로 매번 실패한다.
+ * env `MAX_SHORT_PUBLISH_SECONDS` 로 덮어쓰기 가능 (기본 120 = 2분).
+ */
+const DEFAULT_MAX_SHORT_PUBLISH_SECONDS = 120;
 
 type VideoRow = {
   id: string;
@@ -62,6 +79,7 @@ type VideoRow = {
   video_url: string | null;
   storage_path: string | null;
   download_attempts: number | null;
+  duration_seconds: number | null;
 };
 
 type ContentRow = {
@@ -83,6 +101,66 @@ function getPendingTtlMinutes(): number {
   const parsed = Number(raw);
   if (!Number.isFinite(parsed) || parsed <= 0) return 10;
   return Math.floor(parsed);
+}
+
+function getMaxShortPublishSeconds(): number {
+  const raw = process.env.MAX_SHORT_PUBLISH_SECONDS;
+  if (!raw) return DEFAULT_MAX_SHORT_PUBLISH_SECONDS;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return DEFAULT_MAX_SHORT_PUBLISH_SECONDS;
+  }
+  return Math.floor(parsed);
+}
+
+/**
+ * 영상의 duration_seconds 를 보장한다.
+ * - 이미 채워져 있으면 그 값으로 게이트 판정
+ * - NULL 이면 YouTube API 단건 조회로 백필 시도
+ * - 백필 결과가 NULL(API 실패) 이면 fail-open: 게이트 통과 (기존 동작 유지)
+ *   → 신규 영상은 youtube/check 단계에서 미리 duration 을 저장하므로
+ *      NULL 케이스는 레거시 영상에 한정. 레거시 영상은 대부분 이미 발행 완료라
+ *      alreadySuccess set 으로 자연스럽게 스킵된다.
+ */
+async function ensureDurationWithinLimit(
+  video: VideoRow,
+  maxSeconds: number,
+): Promise<{ ok: boolean; seconds: number | null; backfilled: boolean }> {
+  if (video.duration_seconds != null) {
+    return {
+      ok: video.duration_seconds <= maxSeconds,
+      seconds: video.duration_seconds,
+      backfilled: false,
+    };
+  }
+
+  const seconds = await getVideoDurationSeconds(video.video_id);
+  if (seconds == null) {
+    console.warn(
+      `[publish-meta] ⚠️ duration 백필 실패(video_id=${video.video_id}) → 게이트 통과(레거시 동작)`,
+    );
+    return { ok: true, seconds: null, backfilled: false };
+  }
+
+  try {
+    const supabase = createAdminClient();
+    const { error } = await supabase
+      .from("youtube_videos")
+      .update({ duration_seconds: seconds })
+      .eq("id", video.id);
+    if (error) {
+      console.warn(
+        `[publish-meta] duration 백필 DB 업데이트 실패(${video.video_id}, 진행은 계속): ${error.message}`,
+      );
+    }
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    console.warn(
+      `[publish-meta] duration 백필 예외(${video.video_id}, 진행은 계속): ${msg}`,
+    );
+  }
+
+  return { ok: seconds <= maxSeconds, seconds, backfilled: true };
 }
 
 /**
@@ -187,7 +265,7 @@ async function cleanupStalePendingPublishes(
 
 async function tryAcquirePublishPendingLock(params: {
   videoId: string;
-  platform: "instagram" | "facebook";
+  platform: "instagram" | "facebook" | "threads";
   storagePath: string | null;
   captionPreview: string | null;
 }): Promise<boolean> {
@@ -217,7 +295,7 @@ async function tryAcquirePublishPendingLock(params: {
 
 async function updatePublishPendingToFinal(params: {
   videoId: string;
-  platform: "instagram" | "facebook";
+  platform: "instagram" | "facebook" | "threads";
   status: "success" | "failed";
   externalId: string | null;
   errorMessage: string | null;
@@ -256,16 +334,21 @@ export async function runPublishMetaStep(): Promise<PublishMetaResult> {
     facebook_published_count: 0,
     facebook_failed_count: 0,
     facebook_skipped_count: 0,
+    threads_published_count: 0,
+    threads_failed_count: 0,
+    threads_skipped_count: 0,
     errors: [],
   };
 
   const igEnabled = isInstagramAutoPublishEnabled();
   const fbEnabled = isFacebookAutoPublishEnabled();
+  const thEnabled = isThreadsAutoPublishEnabled();
   const pendingTtlMinutes = getPendingTtlMinutes();
+  const maxShortSeconds = getMaxShortPublishSeconds();
 
-  if (!igEnabled && !fbEnabled) {
+  if (!igEnabled && !fbEnabled && !thEnabled) {
     console.log(
-      "[publish-meta] ⏭  AUTO_PUBLISH_INSTAGRAM/FACEBOOK 둘 다 비활성 → 전체 스킵",
+      "[publish-meta] ⏭  AUTO_PUBLISH_INSTAGRAM/FACEBOOK/THREADS 모두 비활성 → 전체 스킵",
     );
     return result;
   }
@@ -275,10 +358,16 @@ export async function runPublishMetaStep(): Promise<PublishMetaResult> {
   await cleanupStalePendingPublishes(pendingTtlMinutes);
 
   // 1) 대상 영상 조회
+  //    duration 게이트: duration_seconds 가 채워져 있으면서 max 를 초과한 영상은
+  //    SQL 단계에서 아예 제외한다. NULL(레거시/미수집) 은 통과시키고 영상 loop
+  //    안에서 lazy backfill 후 다시 판정한다.
   const { data: videos, error: videosError } = await supabase
     .from("youtube_videos")
-    .select("id, video_id, title, video_url, storage_path, download_attempts")
+    .select(
+      "id, video_id, title, video_url, storage_path, download_attempts, duration_seconds",
+    )
     .eq("processed", true)
+    .or(`duration_seconds.is.null,duration_seconds.lte.${maxShortSeconds}`)
     .order("created_at", { ascending: false })
     .limit(MAX_VIDEOS_PER_RUN);
 
@@ -293,7 +382,7 @@ export async function runPublishMetaStep(): Promise<PublishMetaResult> {
 
   result.processed_videos_count = videos.length;
   console.log(
-    `[publish-meta] 📋 대상 영상 ${videos.length}개 (ig=${igEnabled}, fb=${fbEnabled})`,
+    `[publish-meta] 📋 대상 영상 ${videos.length}개 (ig=${igEnabled}, fb=${fbEnabled}, th=${thEnabled}, max_seconds=${maxShortSeconds})`,
   );
 
   // 2) 이미 성공했거나, TTL 내 pending인 (video_id, platform) 조합 조회 → 중복 발행 방지
@@ -339,11 +428,28 @@ export async function runPublishMetaStep(): Promise<PublishMetaResult> {
       igEnabled && !alreadySuccess.has(successKey(video.video_id, "instagram"));
     const needFb =
       fbEnabled && !alreadySuccess.has(successKey(video.video_id, "facebook"));
+    const needTh =
+      thEnabled && !alreadySuccess.has(successKey(video.video_id, "threads"));
 
-    if (!needIg && !needFb) {
+    if (!needIg && !needFb && !needTh) {
       console.log(`[publish-meta] ⏭  이미 발행 완료된 영상 → 스킵`);
       if (igEnabled) result.instagram_skipped_count += 1;
       if (fbEnabled) result.facebook_skipped_count += 1;
+      if (thEnabled) result.threads_skipped_count += 1;
+      continue;
+    }
+
+    // 3.0) duration 게이트
+    //      duration_seconds 가 NULL 이면 YouTube API 로 lazy backfill 후 판정.
+    //      max 초과 시 IG/FB/Threads 모두 스킵 + DB 백필 → 다음 사이클부터는 SQL 필터로 자동 제외.
+    const gate = await ensureDurationWithinLimit(video, maxShortSeconds);
+    if (!gate.ok) {
+      console.warn(
+        `[publish-meta] ⏭ duration 게이트 차단: video_id=${video.video_id}, seconds=${gate.seconds ?? "?"}, max=${maxShortSeconds}`,
+      );
+      if (needIg) result.instagram_skipped_count += 1;
+      if (needFb) result.facebook_skipped_count += 1;
+      if (needTh) result.threads_skipped_count += 1;
       continue;
     }
 
@@ -364,7 +470,7 @@ export async function runPublishMetaStep(): Promise<PublishMetaResult> {
       .from("generated_contents")
       .select("channel_type, body, hashtags")
       .eq("video_id", video.id)
-      .in("channel_type", ["instagram", "naver_blog"])
+      .in("channel_type", ["instagram", "naver_blog", "threads"])
       .neq("status", "failed");
 
     if (contentsError) {
@@ -373,12 +479,14 @@ export async function runPublishMetaStep(): Promise<PublishMetaResult> {
       result.errors.push(msg);
       if (needIg) result.instagram_failed_count += 1;
       if (needFb) result.facebook_failed_count += 1;
+      if (needTh) result.threads_failed_count += 1;
       continue;
     }
 
     const contents = (contentsRaw ?? []) as ContentRow[];
     const igContent = contents.find((c) => c.channel_type === "instagram");
     const blogContent = contents.find((c) => c.channel_type === "naver_blog");
+    const thContent = contents.find((c) => c.channel_type === "threads");
 
     // ────────────────────────────────────
     // (A) 인스타그램 Reels 발행
@@ -605,9 +713,118 @@ export async function runPublishMetaStep(): Promise<PublishMetaResult> {
       result.facebook_skipped_count += 1;
     }
 
+    // ────────────────────────────────────
+    // (C) 스레드 발행 (graph.threads.net)
+    //    → 캡션 우선순위: threads 채널 본문 > instagram 본문
+    //    → storage_path 가 없으면 로컬 워커 완료까지 스킵 (IG/FB 와 동일)
+    // ────────────────────────────────────
+    if (needTh) {
+      const storagePathFromDb = video.storage_path;
+      if (!storagePathFromDb) {
+        console.warn(
+          `[publish-meta] ⏭  threads skip: video_id=${video.video_id}, reason=storage_path not set by local worker`,
+        );
+        result.threads_skipped_count += 1;
+      } else {
+        const caption = thContent?.body
+          ? buildThreadsCaption(thContent.body, thContent.hashtags)
+          : igContent?.body
+            ? buildThreadsCaption(igContent.body, igContent.hashtags)
+            : null;
+
+        if (!caption) {
+          const msg = `스레드 스킵(${video.video_id}): threads/instagram 캡션 소스가 없음`;
+          console.warn(`[publish-meta] ⚠️  ${msg}`);
+          result.errors.push(msg);
+          result.threads_skipped_count += 1;
+        } else {
+          const { data: publicUrlData } = supabase.storage
+            .from(TEMP_VIDEOS_BUCKET)
+            .getPublicUrl(storagePathFromDb);
+          const publicUrl = publicUrlData?.publicUrl;
+          if (!publicUrl) {
+            const msg = `스레드 실패(${video.video_id}): 스토리지 공개 URL 생성 실패(path=${storagePathFromDb})`;
+            console.error(`[publish-meta] ❌ ${msg}`);
+            result.errors.push(msg);
+            result.threads_failed_count += 1;
+          } else {
+            try {
+              const lockAcquired = await tryAcquirePublishPendingLock({
+                videoId: video.video_id,
+                platform: "threads",
+                storagePath: storagePathFromDb,
+                captionPreview: caption.slice(0, 200),
+              });
+              if (!lockAcquired) {
+                console.log(
+                  `[publish-meta] ⏭  threads skip: video_id=${video.video_id}, reason=pending/success lock exists`,
+                );
+                result.threads_skipped_count += 1;
+              } else {
+                const publishResult = await publishThreadsPost({
+                  videoId: video.video_id,
+                  videoUrl: publicUrl,
+                  caption,
+                  storagePath: storagePathFromDb,
+                  recordResult: false,
+                });
+
+                if (publishResult.success) {
+                  await updatePublishPendingToFinal({
+                    videoId: video.video_id,
+                    platform: "threads",
+                    status: "success",
+                    externalId: publishResult.externalId ?? null,
+                    errorMessage: null,
+                    captionPreview: caption.slice(0, 200),
+                  });
+                  result.threads_published_count += 1;
+                } else {
+                  await updatePublishPendingToFinal({
+                    videoId: video.video_id,
+                    platform: "threads",
+                    status: "failed",
+                    externalId: null,
+                    errorMessage:
+                      publishResult.errorMessage ?? "threads publish failed",
+                    captionPreview: caption.slice(0, 200),
+                  });
+                  result.threads_failed_count += 1;
+                  if (publishResult.errorMessage) {
+                    result.errors.push(
+                      `[threads][${video.video_id}] ${publishResult.errorMessage}`,
+                    );
+                  }
+                }
+              }
+            } catch (error) {
+              const msg = toErrorMessage(error);
+              try {
+                await updatePublishPendingToFinal({
+                  videoId: video.video_id,
+                  platform: "threads",
+                  status: "failed",
+                  externalId: null,
+                  errorMessage: msg,
+                  captionPreview: caption.slice(0, 200),
+                });
+              } catch {
+                // pending 상태 업데이트 실패는 기존 에러 로그로 추적
+              }
+              console.error(`[publish-meta] ❌ 스레드 처리 중 예외: ${msg}`);
+              result.errors.push(`[threads][${video.video_id}] ${msg}`);
+              result.threads_failed_count += 1;
+            }
+          }
+        }
+      }
+    } else if (thEnabled) {
+      result.threads_skipped_count += 1;
+    }
+
     // 디버깅용 영상 요약 로그
     console.log(
-      `[publish-meta] ✔︎ 영상 ${video.video_id} 처리 종료 (ig_need=${needIg}, fb_need=${needFb}, storage=${storagePath ?? "-"})`,
+      `[publish-meta] ✔︎ 영상 ${video.video_id} 처리 종료 (ig_need=${needIg}, fb_need=${needFb}, th_need=${needTh}, storage=${storagePath ?? "-"})`,
     );
   }
 
@@ -616,9 +833,13 @@ export async function runPublishMetaStep(): Promise<PublishMetaResult> {
     result.instagram_published_count +
     result.instagram_failed_count +
     result.facebook_published_count +
-    result.facebook_failed_count;
+    result.facebook_failed_count +
+    result.threads_published_count +
+    result.threads_failed_count;
   const totalSucceeded =
-    result.instagram_published_count + result.facebook_published_count;
+    result.instagram_published_count +
+    result.facebook_published_count +
+    result.threads_published_count;
 
   result.ok = totalTried === 0 || totalSucceeded > 0;
 

@@ -8,6 +8,7 @@ export interface LatestVideoItem {
   thumbnailUrl: string | null;
   publishedAt: string | null;
   videoUrl: string;
+  durationSeconds: number | null;
 }
 
 export interface VideoDetails {
@@ -17,6 +18,20 @@ export interface VideoDetails {
   thumbnailUrl: string | null;
   publishedAt: string | null;
   videoUrl: string;
+  durationSeconds: number | null;
+}
+
+// ISO 8601 duration(PT#H#M#S) → 초. 파싱 실패 시 null.
+export function parseIsoDurationToSeconds(iso: string | null | undefined): number | null {
+  if (!iso) return null;
+  const match = /^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+(?:\.\d+)?)S)?$/.exec(iso);
+  if (!match) return null;
+  const hours = match[1] ? Number(match[1]) : 0;
+  const minutes = match[2] ? Number(match[2]) : 0;
+  const seconds = match[3] ? Number(match[3]) : 0;
+  const total = hours * 3600 + minutes * 60 + seconds;
+  if (!Number.isFinite(total)) return null;
+  return Math.round(total);
 }
 
 function requireEnv(name: string): string {
@@ -51,7 +66,7 @@ export async function getLatestVideos(maxResults = 10): Promise<LatestVideoItem[
 
     const items = response.data.items ?? [];
 
-    return items
+    const baseList = items
       .map((item) => {
         const videoId = item.id?.videoId;
         const snippet = item.snippet;
@@ -71,19 +86,61 @@ export async function getLatestVideos(maxResults = 10): Promise<LatestVideoItem[
             null,
           publishedAt: snippet.publishedAt ?? null,
           videoUrl: buildVideoUrl(videoId),
+          durationSeconds: null as number | null,
         } satisfies LatestVideoItem;
       })
       .filter((item): item is LatestVideoItem => item !== null);
+
+    // search.list 는 contentDetails 를 지원하지 않으므로
+    // videos.list 로 duration 을 한 번 더 보강한다(요청 1회 추가).
+    const durationMap = await fetchDurationsSeconds(
+      baseList.map((v) => v.videoId),
+    );
+    for (const v of baseList) {
+      v.durationSeconds = durationMap.get(v.videoId) ?? null;
+    }
+    return baseList;
   } catch (error) {
     const message = error instanceof Error ? error.message : "알 수 없는 오류";
     throw new Error(`[youtube] 최신 영상 조회 실패: ${message}`);
   }
 }
 
+/**
+ * videos.list(part=contentDetails) 로 여러 영상의 duration(초) 을 일괄 조회한다.
+ * 실패한 경우 해당 ID 는 Map 에서 제외(상위에서 null 처리).
+ */
+async function fetchDurationsSeconds(
+  videoIds: string[],
+): Promise<Map<string, number>> {
+  const result = new Map<string, number>();
+  if (videoIds.length === 0) return result;
+
+  try {
+    const response = await youtube.videos.list({
+      part: ["contentDetails"],
+      id: videoIds,
+      maxResults: videoIds.length,
+    });
+    for (const item of response.data.items ?? []) {
+      const id = item.id;
+      const iso = item.contentDetails?.duration ?? null;
+      const seconds = parseIsoDurationToSeconds(iso);
+      if (id && seconds !== null) {
+        result.set(id, seconds);
+      }
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "알 수 없는 오류";
+    console.warn(`[youtube] duration 일괄 조회 실패(진행은 계속): ${message}`);
+  }
+  return result;
+}
+
 export async function getVideoDetails(videoId: string): Promise<VideoDetails | null> {
   try {
     const response = await youtube.videos.list({
-      part: ["snippet"],
+      part: ["snippet", "contentDetails"],
       id: [videoId],
       maxResults: 1,
     });
@@ -106,10 +163,37 @@ export async function getVideoDetails(videoId: string): Promise<VideoDetails | n
         null,
       publishedAt: snippet.publishedAt ?? null,
       videoUrl: buildVideoUrl(videoId),
+      durationSeconds: parseIsoDurationToSeconds(
+        video.contentDetails?.duration ?? null,
+      ),
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : "알 수 없는 오류";
     throw new Error(`[youtube] 영상 상세 조회 실패(${videoId}): ${message}`);
+  }
+}
+
+/**
+ * videoId 한 개의 duration(초) 만 조회 (publish 단계 lazy backfill 용).
+ * 조회 실패 또는 파싱 실패 시 null 반환.
+ */
+export async function getVideoDurationSeconds(
+  videoId: string,
+): Promise<number | null> {
+  try {
+    const response = await youtube.videos.list({
+      part: ["contentDetails"],
+      id: [videoId],
+      maxResults: 1,
+    });
+    const iso = response.data.items?.[0]?.contentDetails?.duration ?? null;
+    return parseIsoDurationToSeconds(iso);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "알 수 없는 오류";
+    console.warn(
+      `[youtube] duration 단건 조회 실패(${videoId}, 진행은 계속): ${message}`,
+    );
+    return null;
   }
 }
 

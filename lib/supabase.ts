@@ -18,6 +18,7 @@ export interface YouTubeVideo {
   storage_path: string | null;
   published_at: string | null;
   processed: boolean;
+  duration_seconds: number | null;
   created_at: string;
 }
 
@@ -34,8 +35,13 @@ export interface GeneratedContent {
   created_at: string;
 }
 
-type YouTubeVideoInsert = Omit<YouTubeVideo, "id" | "created_at"> & {
+type YouTubeVideoInsert = Omit<
+  YouTubeVideo,
+  "id" | "created_at" | "storage_path" | "duration_seconds"
+> & {
   processed?: boolean;
+  storage_path?: string | null;
+  duration_seconds?: number | null;
 };
 
 type GeneratedContentInsert = Omit<GeneratedContent, "id" | "created_at">;
