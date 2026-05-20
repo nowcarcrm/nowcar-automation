@@ -1220,28 +1220,13 @@ function stripCtaLinesFromEnd(text: string): string {
 }
 
 /**
- * Threads 발행 글 끝에 항상 붙는 고정 footer.
- *
- * 사용자 요청(2026-05-20): 알고리즘 패널티 최소화를 위해 CTA 5줄은 strip 하되,
- * 카페 + 홈페이지 두 링크는 유지. generate 결과가 매번 달라도 footer 는 결정적.
- *
- * 외부 링크 2개라 reach 감소 가능성이 있다는 외부 자료가 있으나, 두 링크 모두
- * 비즈니스 핵심이라는 판단으로 채택.
- */
-const THREADS_FOOTER =
-  "\n\n초대박신차의성지 https://cafe.naver.com/fktkaus\nwww.나우카.com";
-
-/**
  * generated_contents.body 만으로 스레드 본문을 구성한다.
  * 스레드 텍스트는 최대 500자.
  *
- * 발행 글에서 제거하는 것 (사용자 요청 2026-05-20):
+ * 발행 글에서 제거하는 것:
  *   - 이모지 + box-drawing 구분선 (stripThreadsDecorations)
  *   - hashtags 라인 전체 (인자로 받지만 무시)
  *   - 본문 끝의 CTA 블록 (전화/도메인/카톡/유튜브/카페 라인)
- *
- * 발행 글에 추가하는 것:
- *   - THREADS_FOOTER (카페 URL + 홈페이지)
  *
  * 호출부 시그니처 호환성을 위해 hashtags 인자는 그대로 받지만 사용하지 않는다.
  */
@@ -1254,12 +1239,7 @@ export function buildThreadsCaption(
   const stripped = stripThreadsDecorations(body);
   const withoutCta = stripCtaLinesFromEnd(stripped).trim();
 
-  const footerLen = THREADS_FOOTER.length;
-  const bodyLimit = Math.max(0, TH_MAX - footerLen);
-  const bodyForOutput =
-    withoutCta.length <= bodyLimit
-      ? withoutCta
-      : withoutCta.slice(0, bodyLimit).trimEnd();
-
-  return `${bodyForOutput}${THREADS_FOOTER}`;
+  return withoutCta.length <= TH_MAX
+    ? withoutCta
+    : withoutCta.slice(0, TH_MAX).trimEnd();
 }
