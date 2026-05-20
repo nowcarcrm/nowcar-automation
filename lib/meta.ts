@@ -1184,28 +1184,23 @@ function stripThreadsDecorations(text: string): string {
 }
 
 /**
- * generated_contents.body + hashtags 를 스레드 본문으로 합친다.
+ * generated_contents.body 만으로 스레드 본문을 구성한다.
  * 스레드 텍스트는 최대 500자.
- * Threads 발행 글은 이모지/구분선 제거 (사용자 요청 2026-05-20).
+ *
+ * 발행 글에서 제거하는 것 (사용자 요청 2026-05-20):
+ *   - 이모지 + box-drawing 구분선 (stripThreadsDecorations)
+ *   - hashtags 라인 전체 (인자로 받지만 무시)
+ *
+ * 호출부 시그니처 호환성을 위해 hashtags 인자는 그대로 받지만 사용하지 않는다.
  */
 export function buildThreadsCaption(
   body: string,
   hashtags: string | null,
 ): string {
+  void hashtags;
   const TH_MAX = 500;
-  const cleanedBody = stripThreadsDecorations(body);
-  const cleanedHashtags = hashtags ? stripThreadsDecorations(hashtags) : null;
+  const cleanedBody = stripThreadsDecorations(body).trim();
 
-  const combined = cleanedHashtags
-    ? `${cleanedBody.trim()}\n\n${cleanedHashtags.trim()}`
-    : cleanedBody.trim();
-
-  if (combined.length <= TH_MAX) return combined;
-
-  const tagLen = cleanedHashtags ? cleanedHashtags.trim().length + 2 : 0;
-  const bodyLimit = Math.max(0, TH_MAX - tagLen - 1);
-  const truncatedBody = cleanedBody.trim().slice(0, bodyLimit).trimEnd();
-  return cleanedHashtags
-    ? `${truncatedBody}\n\n${cleanedHashtags.trim()}`
-    : truncatedBody;
+  if (cleanedBody.length <= TH_MAX) return cleanedBody;
+  return cleanedBody.slice(0, TH_MAX).trimEnd();
 }
