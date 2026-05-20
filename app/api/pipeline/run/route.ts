@@ -155,30 +155,27 @@ export async function GET(request: NextRequest) {
     console.error(`[pipeline] step1 실패: ${message}`);
   }
 
-  // [2/4] 콘텐츠 생성 (조건부)
+  // [2/5] 콘텐츠 생성
+  //   - 이전에는 step1.new_videos_count > 0 일 때만 돌렸는데, 그 run 의 generate 가
+  //     실패하면 영상은 processed=false 로 남고 이후 사이클은 new_videos_count=0
+  //     이라 영원히 재시도되지 않아 발행이 영구 누락되는 문제가 있었다.
+  //   - 항상 runGenerateStep 을 호출하고, 내부의 getUnprocessedVideos 가 빈 배열이면
+  //     스스로 빠르게 끝낸다. (force 플래그는 호환성을 위해 유지하지만 게이트 의미는 없음)
   const step2StartedAt = Date.now();
   try {
-    if (!force && step1.new_videos_count === 0) {
-      console.log("[2/4] ⏭️ 신규 영상이 없어 콘텐츠 생성을 건너뜁니다.");
-      step2.status = "skipped";
-      step2.processed_videos_count = 0;
-      step2.total_contents_generated = 0;
-      step2.duration_seconds = Math.round((Date.now() - step2StartedAt) / 1000);
-    } else {
-      console.log("[2/4] ✨ Claude 5종 콘텐츠 생성 중...");
-      const data = await runGenerateStep();
+    console.log("[2/5] ✨ Claude 5종 콘텐츠 생성 중...");
+    const data = await runGenerateStep();
 
-      step2.status = "ok";
-      step2.processed_videos_count = data.processed_videos_count ?? 0;
-      step2.total_contents_generated = data.total_contents_generated ?? 0;
-      if ((data.errors.length ?? 0) > 0) {
-        errors.push(...data.errors.map((error) => `[step2_generate] ${error}`));
-      }
-      step2.duration_seconds = Math.round((Date.now() - step2StartedAt) / 1000);
-      console.log(
-        `[2/4] ✅ ${step2.processed_videos_count}개 영상 처리, ${step2.total_contents_generated}개 콘텐츠 생성 (소요: ${step2.duration_seconds}s)`,
-      );
+    step2.processed_videos_count = data.processed_videos_count ?? 0;
+    step2.total_contents_generated = data.total_contents_generated ?? 0;
+    step2.status = step2.processed_videos_count === 0 ? "skipped" : "ok";
+    if ((data.errors.length ?? 0) > 0) {
+      errors.push(...data.errors.map((error) => `[step2_generate] ${error}`));
     }
+    step2.duration_seconds = Math.round((Date.now() - step2StartedAt) / 1000);
+    console.log(
+      `[2/5] ✅ ${step2.processed_videos_count}개 영상 처리, ${step2.total_contents_generated}개 콘텐츠 생성 (소요: ${step2.duration_seconds}s)`,
+    );
   } catch (error) {
     step2.status = "error";
     step2.duration_seconds = Math.round((Date.now() - step2StartedAt) / 1000);
