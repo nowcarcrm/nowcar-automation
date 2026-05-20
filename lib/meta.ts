@@ -1160,24 +1160,52 @@ export function buildInstagramCaption(
 }
 
 /**
+ * Threads 본문에서 이모지와 box-drawing 구분선을 제거하고 결과를 정리.
+ * 다른 채널(IG/FB/카페/블로그)에는 영향 없음 — buildThreadsCaption 내부에서만 사용.
+ *
+ * 제거 대상:
+ *   - 이모지 (\p{Extended_Pictographic}, ZWJ, variation selector, skin-tone modifier)
+ *   - Box Drawing (U+2500–U+257F) — 예: ━━━ 구분선
+ *
+ * 정리: 각 줄의 앞쪽 공백 제거, 연속 빈 줄 1개로 축소, 전체 trim.
+ */
+function stripThreadsDecorations(text: string): string {
+  return text
+    .replace(
+      /[\p{Extended_Pictographic}‍︎️\u{1F3FB}-\u{1F3FF}]/gu,
+      "",
+    )
+    .replace(/[─-╿]/g, "")
+    .split("\n")
+    .map((line) => line.replace(/^[ \t]+/, "").trimEnd())
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+/**
  * generated_contents.body + hashtags 를 스레드 본문으로 합친다.
  * 스레드 텍스트는 최대 500자.
+ * Threads 발행 글은 이모지/구분선 제거 (사용자 요청 2026-05-20).
  */
 export function buildThreadsCaption(
   body: string,
   hashtags: string | null,
 ): string {
   const TH_MAX = 500;
-  const combined = hashtags
-    ? `${body.trim()}\n\n${hashtags.trim()}`
-    : body.trim();
+  const cleanedBody = stripThreadsDecorations(body);
+  const cleanedHashtags = hashtags ? stripThreadsDecorations(hashtags) : null;
+
+  const combined = cleanedHashtags
+    ? `${cleanedBody.trim()}\n\n${cleanedHashtags.trim()}`
+    : cleanedBody.trim();
 
   if (combined.length <= TH_MAX) return combined;
 
-  const tagLen = hashtags ? hashtags.trim().length + 2 : 0;
+  const tagLen = cleanedHashtags ? cleanedHashtags.trim().length + 2 : 0;
   const bodyLimit = Math.max(0, TH_MAX - tagLen - 1);
-  const truncatedBody = body.trim().slice(0, bodyLimit).trimEnd();
-  return hashtags
-    ? `${truncatedBody}\n\n${hashtags.trim()}`
+  const truncatedBody = cleanedBody.trim().slice(0, bodyLimit).trimEnd();
+  return cleanedHashtags
+    ? `${truncatedBody}\n\n${cleanedHashtags.trim()}`
     : truncatedBody;
 }
