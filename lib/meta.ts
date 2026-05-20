@@ -1184,12 +1184,49 @@ function stripThreadsDecorations(text: string): string {
 }
 
 /**
+ * Threads 본문 끝에 붙은 CTA 라인 블록을 제거한다.
+ *
+ * CTA 식별 패턴 (line 단위 매치):
+ *   - 1666-3230 (대표 전화번호)
+ *   - www.나우카.com / 나우카.com (도메인)
+ *   - "카톡 ... 나우카" / "유튜브 ... 나우카" (타 플랫폼 핸들)
+ *   - "네이버 카페" / "초대박신차의성지" (카페 ref)
+ *
+ * 본문 끝에서부터 거꾸로 돌면서 CTA 또는 빈 줄이면 제거, CTA 아닌 라인을
+ * 만나면 멈춤 → 본문 중간에 같은 토큰이 나와도 안전.
+ */
+function stripCtaLinesFromEnd(text: string): string {
+  const ctaPatterns: RegExp[] = [
+    /1666[\s-]?3230/,
+    /www\.나우카\.com|나우카\.com/,
+    /카톡[^\n]*나우카/,
+    /유튜브[^\n]*나우카/,
+    /네이버\s*카페|초대박신차의성지/,
+  ];
+  const lines = text.split("\n");
+  while (lines.length > 0) {
+    const last = lines[lines.length - 1].trim();
+    if (last === "") {
+      lines.pop();
+      continue;
+    }
+    if (ctaPatterns.some((re) => re.test(last))) {
+      lines.pop();
+      continue;
+    }
+    break;
+  }
+  return lines.join("\n").trimEnd();
+}
+
+/**
  * generated_contents.body 만으로 스레드 본문을 구성한다.
  * 스레드 텍스트는 최대 500자.
  *
  * 발행 글에서 제거하는 것 (사용자 요청 2026-05-20):
  *   - 이모지 + box-drawing 구분선 (stripThreadsDecorations)
  *   - hashtags 라인 전체 (인자로 받지만 무시)
+ *   - 본문 끝의 CTA 블록 (전화/도메인/카톡/유튜브/카페 라인)
  *
  * 호출부 시그니처 호환성을 위해 hashtags 인자는 그대로 받지만 사용하지 않는다.
  */
@@ -1199,8 +1236,9 @@ export function buildThreadsCaption(
 ): string {
   void hashtags;
   const TH_MAX = 500;
-  const cleanedBody = stripThreadsDecorations(body).trim();
+  const stripped = stripThreadsDecorations(body);
+  const withoutCta = stripCtaLinesFromEnd(stripped).trim();
 
-  if (cleanedBody.length <= TH_MAX) return cleanedBody;
-  return cleanedBody.slice(0, TH_MAX).trimEnd();
+  if (withoutCta.length <= TH_MAX) return withoutCta;
+  return withoutCta.slice(0, TH_MAX).trimEnd();
 }
