@@ -5,6 +5,7 @@ import {
   isBotBlockError,
   notifyBotBlockIfNeeded,
 } from "@/lib/youtube-bot-detect";
+import { ensureMetaTokenLoaded } from "@/lib/meta-token";
 
 /**
  * ============================================================
@@ -266,6 +267,21 @@ async function handleDownload(req: NextRequest): Promise<NextResponse> {
     );
   }
   console.log("[cron/download] ✅ 인증 통과");
+
+  // 1.4) Meta long-lived token 자동 prime/refresh.
+  //      DB 의 system_tokens 에서 최신 값으로 process.env.META_ACCESS_TOKEN 갱신.
+  //      만료 14일 전부터는 자동 fb_exchange_token. 실패 시 메일 알림.
+  try {
+    const tokenResult = await ensureMetaTokenLoaded();
+    console.log(
+      `[cron/download] 🔑 Meta token: status=${tokenResult.status} expiresAt=${tokenResult.expiresAt ?? "-"}${tokenResult.note ? ` note=${tokenResult.note.slice(0, 80)}` : ""}`,
+    );
+  } catch (error) {
+    const msg = toErrorMessage(error);
+    console.warn(
+      `[cron/download] ⚠ Meta token prime 단계 실패(env 토큰 사용): ${msg}`,
+    );
+  }
 
   // 1.5) (B 안) 좀비 영상 자동 부활 — attempts 한계 도달한 최근 영상을 풀어준다.
   //      A 안(봇차단 감지) 이 정상 작동하면 발동 거의 안 되지만, 다른 일시 장애
