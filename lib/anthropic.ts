@@ -358,18 +358,11 @@ ${channelGuide}
 ${videoTranscript}
 
 [출력 규칙]
-- 아래 JSON 형식만 출력. 설명 문장/마크다운 코드블록 절대 출력 X.
-- body 에 4단 구조(훅 / 공감·경험 / 인사이트 / 질문) Threads 본문만.
-- title / hashtags / meta_description 는 반드시 null.
+- 반드시 save_content_draft 툴을 호출해서 결과를 저장하세요.
+- body 에 4단 구조(훅 / 공감·경험 / 인사이트 / 질문) Threads 본문만 넣으세요.
+- title / hashtags / meta_description 는 null 로 두세요.
 - 본문에 CTA(전화·카톡·홈페이지·유튜브·카페)·해시태그·이모지·박스 구분자
   절대 포함 금지.
-
-{
-  "title": null,
-  "body": "string",
-  "hashtags": null,
-  "meta_description": null
-}
 `.trim();
   }
 
@@ -389,57 +382,116 @@ ${channelGuide}
 ${videoTranscript}
 
 [출력 규칙]
-- 아래 JSON 형식만 출력하고, 설명 문장/마크다운 코드블록은 절대 출력하지 마세요.
-- title/body/hashtags/meta_description 키를 반드시 포함하세요.
-- 채널에 필요 없는 값은 null로 반환하세요.
-
-{
-  "title": "string 또는 null",
-  "body": "string",
-  "hashtags": "string 또는 null",
-  "meta_description": "string 또는 null"
-}
+- 반드시 save_content_draft 툴을 호출해서 결과를 저장하세요.
+- title/body/hashtags/meta_description 4개 필드를 모두 채우세요.
+- 채널에 필요 없는 값은 null 로 두세요.
 `.trim();
 }
 
-function extractTextFromResponse(response: Anthropic.Messages.Message): string {
-  return response.content
-    .filter((block) => block.type === "text")
-    .map((block) => block.text)
-    .join("\n")
-    .trim();
-}
+/**
+ * Anthropic 응답에서 콘텐츠 초안을 안전하게 추출.
+ *
+ * 과거에는 본문 JSON 텍스트를 normal text 로 받아 JSON.parse 했는데,
+ * 본문에 따옴표/줄바꿈이 escape 안 되어 파싱이 깨지는 케이스가 있었다
+ * (예: 2026-05-25 wbdvTTgtvbc threads 생성 실패). tool_use 를 강제하면
+ * 모델이 schema-valid 한 구조화 데이터를 직접 반환하므로 본문 안 특수문자
+ * 와 무관하게 100% 파싱이 보장된다.
+ *
+ * 폴백:
+ *  1) tool_use 블록이 있으면 그것만 신뢰
+ *  2) 없으면(legacy) text 블록을 모아 기존 JSON.parse 시도
+ */
+const CONTENT_DRAFT_TOOL_NAME = "save_content_draft";
 
-function safeJsonParse(rawText: string): {
+const CONTENT_DRAFT_TOOL: Anthropic.Tool = {
+  name: CONTENT_DRAFT_TOOL_NAME,
+  description:
+    "지정 채널용 본문 초안을 저장한다. 채널에 필요 없는 필드는 null 로 둔다.",
+  input_schema: {
+    type: "object",
+    properties: {
+      title: {
+        type: ["string", "null"],
+        description: "제목. 인스타/스레드는 null.",
+      },
+      body: {
+        type: "string",
+        description:
+          "본문. 채널별 가이드/톤 규칙을 따른 최종 텍스트. 줄바꿈/따옴표는 그대로 포함.",
+      },
+      hashtags: {
+        type: ["string", "null"],
+        description: "해시태그 모음. 본문과 별도. 스레드는 null.",
+      },
+      meta_description: {
+        type: ["string", "null"],
+        description: "SEO 메타 설명. 블로그/티스토리만.",
+      },
+    },
+    required: ["title", "body", "hashtags", "meta_description"],
+  },
+};
+
+interface ParsedDraft {
   title: string | null;
   body: string;
   hashtags: string | null;
   meta_description: string | null;
-} {
+}
+
+function normalizeDraftFields(input: {
+  title?: unknown;
+  body?: unknown;
+  hashtags?: unknown;
+  meta_description?: unknown;
+}): ParsedDraft {
+  if (typeof input.body !== "string" || input.body.trim().length === 0) {
+    throw new Error("body 필드가 비어 있습니다.");
+  }
+  return {
+    title: typeof input.title === "string" ? input.title : null,
+    body: input.body,
+    hashtags: typeof input.hashtags === "string" ? input.hashtags : null,
+    meta_description:
+      typeof input.meta_description === "string"
+        ? input.meta_description
+        : null,
+  };
+}
+
+function parseDraftFromResponse(
+  response: Anthropic.Messages.Message,
+): ParsedDraft {
+  const toolUseBlock = response.content.find(
+    (block): block is Anthropic.ToolUseBlock =>
+      block.type === "tool_use" && block.name === CONTENT_DRAFT_TOOL_NAME,
+  );
+
+  if (toolUseBlock) {
+    return normalizeDraftFields(
+      toolUseBlock.input as Record<string, unknown>,
+    );
+  }
+
+  // Legacy fallback — tool_use 가 없을 때 text 블록에서 JSON 파싱.
+  // tool_choice 로 강제했으므로 실제로 들어올 일은 거의 없음.
+  const rawText = response.content
+    .filter((block): block is Anthropic.TextBlock => block.type === "text")
+    .map((block) => block.text)
+    .join("\n")
+    .trim();
+
+  if (!rawText) {
+    throw new Error("응답에 tool_use 도 text 블록도 없습니다.");
+  }
+
   const cleaned = rawText
     .replace(/^```json\s*/i, "")
     .replace(/^```\s*/i, "")
     .replace(/\s*```$/i, "")
     .trim();
-
-  const parsed = JSON.parse(cleaned) as {
-    title?: unknown;
-    body?: unknown;
-    hashtags?: unknown;
-    meta_description?: unknown;
-  };
-
-  if (typeof parsed.body !== "string" || parsed.body.trim().length === 0) {
-    throw new Error("body 필드가 비어 있습니다.");
-  }
-
-  return {
-    title: typeof parsed.title === "string" ? parsed.title : null,
-    body: parsed.body,
-    hashtags: typeof parsed.hashtags === "string" ? parsed.hashtags : null,
-    meta_description:
-      typeof parsed.meta_description === "string" ? parsed.meta_description : null,
-  };
+  const parsed = JSON.parse(cleaned) as Record<string, unknown>;
+  return normalizeDraftFields(parsed);
 }
 
 export async function generateContent(
@@ -466,6 +518,10 @@ export async function generateContentWithUsage(
       model: MODEL,
       max_tokens: CHANNEL_MAX_TOKENS[channelType],
       temperature: 0.8,
+      // tool_use 강제 — 모델이 schema-valid 한 JSON 객체를 직접 반환하므로
+      // 본문 따옴표/줄바꿈 escape 문제로 JSON.parse 가 깨질 일이 없다.
+      tools: [CONTENT_DRAFT_TOOL],
+      tool_choice: { type: "tool", name: CONTENT_DRAFT_TOOL_NAME },
       messages: [
         {
           role: "user",
@@ -474,8 +530,7 @@ export async function generateContentWithUsage(
       ],
     });
 
-    const rawText = extractTextFromResponse(response);
-    const parsed = safeJsonParse(rawText);
+    const parsed = parseDraftFromResponse(response);
 
     return {
       draft: {
