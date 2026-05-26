@@ -1,6 +1,10 @@
 import { after, NextRequest, NextResponse } from "next/server";
 import { createAdminClient, downloadAndUploadShort } from "@/lib/storage";
 import { runDetectStep } from "@/lib/pipeline/detect";
+import {
+  isBotBlockError,
+  notifyBotBlockIfNeeded,
+} from "@/lib/youtube-bot-detect";
 
 /**
  * ============================================================
@@ -41,6 +45,16 @@ export const maxDuration = 300;
 const MAX_ATTEMPTS = 5;
 /** 한 번에 처리할 최대 영상 수 (300s 타임아웃 안에 안전하게 끝나도록) */
 const BATCH_SIZE = 2;
+/**
+ * (B 안) attempts 도달로 좀비가 된 영상에 자동 복구 기회를 주는 윈도우.
+ * 최근 N 일 내 영상은 매 cron 진입 시 attempts >= MAX 이면 0 으로 한 번 풀어
+ * 쿠키 재갱신 같은 외부 변경이 자동으로 반영되도록 한다.
+ *
+ * A 안(봇차단 감지 → attempts 증가 안 함) 이 정상 작동하면 거의 발동되지
+ * 않지만, 패턴이 빠진 에러나 다른 일시 장애에도 자가 회복하도록 belt-and-
+ * suspenders 로 둔다.
+ */
+const STALE_ATTEMPTS_RESET_WINDOW_DAYS = 7;
 
 interface PendingVideo {
   id: string;
@@ -130,12 +144,20 @@ async function markFailed(
 ): Promise<void> {
   const supabase = createAdminClient();
   const truncated = errorMessage.slice(0, 500);
+  // A 안: 봇차단(쿠키 만료)이 의심되면 download_attempts 를 증가시키지 않는다.
+  // 쿠키 갱신 + 재배포만 하면 다음 cron 사이클에 자동 재시도되어 별도 SQL
+  // 리셋이 불필요하다. 에러 정보는 그대로 보존해 진단/알림 용도로 사용.
+  const botBlock = isBotBlockError(errorMessage);
+  const nextAttempts = botBlock
+    ? (prevAttempts ?? 0)
+    : (prevAttempts ?? 0) + 1;
+
   // download_error 는 다음 성공 시 클리어되지만 last_download_error 는 영구 보존.
   // Hobby 의 1시간 로그 보존을 우회해 주말 실패 사유를 다음 영업일에도 진단하기 위함.
   const { error } = await supabase
     .from("youtube_videos")
     .update({
-      download_attempts: (prevAttempts ?? 0) + 1,
+      download_attempts: nextAttempts,
       download_error: truncated,
       last_download_error: truncated,
       last_download_error_at: new Date().toISOString(),
@@ -147,6 +169,41 @@ async function markFailed(
       `[cron/download] 실패 기록 중 에러(진행은 계속): ${error.message}`,
     );
   }
+
+  if (botBlock) {
+    console.warn(
+      `[cron/download] 🍪 봇차단 감지 → attempts 유지(${nextAttempts}). 쿠키 갱신 시 자동 재시도.`,
+    );
+  }
+}
+
+/**
+ * (B 안) 좀비 영상 자동 부활 가드.
+ * STALE_ATTEMPTS_RESET_WINDOW_DAYS 일 내 등록된 영상 중 storage_path IS NULL
+ * & attempts >= MAX 인 행을 attempts=0 으로 풀어준다. cron 진입부에서 1회 호출.
+ */
+async function resetStaleAttempts(): Promise<number> {
+  const supabase = createAdminClient();
+  const windowStart = new Date(
+    Date.now() - STALE_ATTEMPTS_RESET_WINDOW_DAYS * 24 * 60 * 60 * 1000,
+  ).toISOString();
+
+  const { data, error } = await supabase
+    .from("youtube_videos")
+    .update({ download_attempts: 0 })
+    .is("storage_path", null)
+    .gte("download_attempts", MAX_ATTEMPTS)
+    .gte("created_at", windowStart)
+    .select("id");
+
+  if (error) {
+    console.warn(
+      `[cron/download] stale attempts 리셋 실패(진행은 계속): ${error.message}`,
+    );
+    return 0;
+  }
+
+  return data?.length ?? 0;
 }
 
 /**
@@ -210,6 +267,21 @@ async function handleDownload(req: NextRequest): Promise<NextResponse> {
   }
   console.log("[cron/download] ✅ 인증 통과");
 
+  // 1.5) (B 안) 좀비 영상 자동 부활 — attempts 한계 도달한 최근 영상을 풀어준다.
+  //      A 안(봇차단 감지) 이 정상 작동하면 발동 거의 안 되지만, 다른 일시 장애
+  //      에도 자가 회복되도록 safety net 으로 둔다.
+  try {
+    const revived = await resetStaleAttempts();
+    if (revived > 0) {
+      console.log(
+        `[cron/download] ♻ stale attempts 리셋: ${revived}개 영상 부활 (window=${STALE_ATTEMPTS_RESET_WINDOW_DAYS}d)`,
+      );
+    }
+  } catch (error) {
+    const msg = toErrorMessage(error);
+    console.warn(`[cron/download] ⚠ stale 리셋 단계 실패(진행은 계속): ${msg}`);
+  }
+
   // 2) 신규 영상 detect — DB 에 행 삽입(storage_path=null).
   //    실패해도 기존 pending 다운로드는 계속 진행한다.
   try {
@@ -268,6 +340,11 @@ async function handleDownload(req: NextRequest): Promise<NextResponse> {
   console.log(`[cron/download] 🎬 다운로드 대기 ${pending.length}건 처리`);
 
   // 3) 영상별 처리 — 한 건 실패해도 다음 건은 계속
+  const botBlockFailures: Array<{
+    video_id: string;
+    title: string | null;
+    error: string;
+  }> = [];
   for (const video of pending) {
     const label = `${video.video_id}${video.title ? ` (${video.title.slice(0, 30)})` : ""}`;
     try {
@@ -285,7 +362,29 @@ async function handleDownload(req: NextRequest): Promise<NextResponse> {
       errors.push(`[${video.video_id}] ${msg}`);
       console.error(`[cron/download] ❌ 실패: ${label} - ${msg}`);
       await markFailed(video.id, msg, video.download_attempts);
+      if (isBotBlockError(msg)) {
+        botBlockFailures.push({
+          video_id: video.video_id,
+          title: video.title,
+          error: msg,
+        });
+      }
     }
+  }
+
+  // 봇차단 감지 시 운영자에게 메일 알림 (6h cooldown).
+  if (botBlockFailures.length > 0) {
+    const sample = botBlockFailures[0]!;
+    const alertResult = await notifyBotBlockIfNeeded({
+      failedVideos: botBlockFailures.map((f) => ({
+        video_id: f.video_id,
+        title: f.title,
+      })),
+      sampleError: sample.error,
+    });
+    console.log(
+      `[cron/download] 🍪 봇차단 알림 처리: sent=${alertResult.sent} reason=${alertResult.reason}`,
+    );
   }
 
   const durationSeconds = Math.round((Date.now() - startedAt) / 1000);
