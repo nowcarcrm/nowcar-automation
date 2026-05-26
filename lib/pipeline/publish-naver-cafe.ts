@@ -15,7 +15,13 @@ export interface PublishNaverCafeResult {
   errors: string[];
 }
 
-const MAX_VIDEOS_PER_RUN = 3;
+/** SELECT 단에서 가져올 영상 수. 실제 처리(발행 시도)는 한 사이클 1건 cap.
+ *  SELECT 를 넉넉히 가져와 alreadySuccess 영상을 제외하고도 후보가 남도록 한다.
+ *  (3 → 20 으로 변경. 5+ 영상 백로그도 자동 회복하기 위함) */
+const SELECT_PAGE_SIZE = 20;
+/** 한 사이클에 카페 발행 시도하는 영상 최대 개수.
+ *  Naver 999 "연속 등록 불가" 응답을 피하려고 1건 hard cap. */
+const MAX_PUBLISH_PER_RUN = 1;
 /** 영상 감지 시각 이후 발행까지 더할 무작위 지연(상한). 매일 같은 시각에
  *  같은 포맷으로 글 올라가는 패턴을 깨서 네이버 어뷰징 감지기를 회피한다. */
 const PUBLISH_JITTER_MAX_MINUTES = 120;
@@ -235,7 +241,7 @@ export async function runPublishNaverCafeStep(): Promise<PublishNaverCafeResult>
     .select("id, video_id, title, video_url, created_at")
     .eq("processed", true)
     .order("created_at", { ascending: false })
-    .limit(MAX_VIDEOS_PER_RUN);
+    .limit(SELECT_PAGE_SIZE);
 
   if (videosError) {
     throw new Error(`youtube_videos 조회 실패: ${videosError.message}`);
@@ -367,6 +373,14 @@ export async function runPublishNaverCafeStep(): Promise<PublishNaverCafeResult>
           errorMessage: null,
           captionPreview,
         });
+        // 한 사이클 1건 hard cap — Naver 의 "연속 등록 불가(999)" 봇감지
+        // 응답을 피하기 위해 한 영상 발행 성공 직후 종료한다.
+        if (result.naver_cafe_published_count >= MAX_PUBLISH_PER_RUN) {
+          console.log(
+            `[publish-naver-cafe] ✅ ${MAX_PUBLISH_PER_RUN}건 발행 완료 → 하루 1건 cap 으로 사이클 종료`,
+          );
+          break;
+        }
       } else {
         result.naver_cafe_failed_count += 1;
         const msg = publishResult.errorMessage ?? "알 수 없는 발행 실패";
