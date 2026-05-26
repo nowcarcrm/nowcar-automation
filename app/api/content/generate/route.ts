@@ -73,7 +73,22 @@ function createDefaultChannelResult(): Record<ChannelType, ChannelResult> {
   };
 }
 
-function validateCta(body: string): { valid: boolean; missing: string[] } {
+/**
+ * Threads 는 [[project_threads_auto_marketer_tone]] 정책상 반말·4단 마케터
+ * 톤이며 CTA(전화·홈페이지·유튜브) / 해시태그 / 이모지 박스 전부 면제.
+ * 다른 채널은 운영자 톤 + CTA 필수.
+ */
+function isCtaExemptChannel(channelType: ChannelType): boolean {
+  return channelType === "threads";
+}
+
+function validateCta(
+  body: string,
+  channelType: ChannelType,
+): { valid: boolean; missing: string[] } {
+  if (isCtaExemptChannel(channelType)) {
+    return { valid: true, missing: [] };
+  }
   const missing: string[] = [];
   if (!body.includes("www.나우카.com") && !body.includes("나우카.com")) {
     missing.push("www.나우카.com");
@@ -97,7 +112,7 @@ async function generateWithCtaRetry(
   for (let attempt = 0; attempt <= MAX_CTA_RETRY; attempt += 1) {
     const generated = await generateContentWithUsage(baseText, title, channelType);
     last = generated;
-    const validation = validateCta(generated.draft.body);
+    const validation = validateCta(generated.draft.body, channelType);
 
     if (validation.valid) {
       console.log(
@@ -219,7 +234,7 @@ export async function GET() {
             generated: GeneratedDraftWithUsage;
           };
           const bodyLength = generated.draft.body.length;
-          const validation = validateCta(generated.draft.body);
+          const validation = validateCta(generated.draft.body, channelType);
 
           channelResults[channelType] = {
             success: true,

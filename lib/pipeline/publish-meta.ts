@@ -502,12 +502,15 @@ export async function runPublishMetaStep(): Promise<PublishMetaResult> {
 
     // 4) 이 영상에 속한 generated_contents 조회
     //    → instagram 캡션/해시태그, naver_blog 본문을 가져온다.
+    //    status 가 'failed' 또는 'cta_incomplete' 인 행은 발행 부적합이므로 제외.
+    //    (cta_incomplete 는 CTA 키워드가 빠진 미완성 콘텐츠 — 발행되면 운영자
+    //     톤/안내 정보가 누락된 채 SNS 에 올라가므로 차단)
     const { data: contentsRaw, error: contentsError } = await supabase
       .from("generated_contents")
       .select("channel_type, body, hashtags")
       .eq("video_id", video.id)
       .in("channel_type", ["instagram", "naver_blog", "threads"])
-      .neq("status", "failed");
+      .not("status", "in", "(failed,cta_incomplete)");
 
     if (contentsError) {
       const msg = `generated_contents 조회 실패(${video.video_id}): ${contentsError.message}`;
