@@ -107,17 +107,55 @@ export async function GET(req: NextRequest) {
       `&access_token=${encodeURIComponent(token)}`,
   );
 
-  // 4) IG 비즈니스 계정 정보
+  // 4) IG 비즈니스 계정 정보 — account_type 필드 제거(존재하지 않는 필드라 400 났었음)
   result.ig_account = await fetchJson(
-    `${GRAPH}/${igId}?fields=id,username,name,account_type,biography` +
+    `${GRAPH}/${igId}?fields=id,username,name,biography,followers_count,media_count` +
       `&access_token=${encodeURIComponent(token)}`,
   );
 
-  // 5) /me/accounts — 토큰이 user token 이면 페이지 목록 반환
-  result.me_accounts = await fetchJson(
-    `${GRAPH}/me/accounts?fields=id,name,instagram_business_account` +
+  // 5) IG 계정의 최근 미디어 1개 조회 — IG 액세스 자체 가능 여부 검증
+  result.ig_recent_media = await fetchJson(
+    `${GRAPH}/${igId}/media?limit=1&fields=id,media_type,timestamp` +
       `&access_token=${encodeURIComponent(token)}`,
   );
+
+  // 6) 실제 IG REELS 컨테이너 생성 시뮬레이션 — 발행 시점 raw 에러 캡처
+  //    의도적으로 video_url 을 빈 값으로 두지 않고, 명백히 다운로드 가능한 작은
+  //    Supabase 공개 영상(있다면) 또는 더미 URL 로 시도. 우리가 보고 싶은 건
+  //    "video_url unreachable" 같은 정상 에러인지, 아니면 "Authorization" 인지.
+  const dummyVideoUrl =
+    "https://entxwtgcgmviafyzcgdn.supabase.co/storage/v1/object/public/temp-videos/U0qK9XLTrks.mp4";
+  const containerBody = new URLSearchParams({
+    media_type: "REELS",
+    video_url: dummyVideoUrl,
+    caption: "[diagnose] do-not-publish test container — auto cleanup",
+    access_token: token,
+  });
+  try {
+    const containerResp = await fetch(`${GRAPH}/${igId}/media`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: containerBody,
+    });
+    const raw = await containerResp.text();
+    let parsed: unknown = raw;
+    try {
+      parsed = raw ? JSON.parse(raw) : null;
+    } catch {
+      // keep raw
+    }
+    result.ig_publish_dry_run = {
+      ok: containerResp.ok,
+      status: containerResp.status,
+      body: parsed,
+      note:
+        "이 요청은 컨테이너만 생성하고 publish 는 안 합니다. 컨테이너가 만들어지면 24h 후 자동 만료.",
+    };
+  } catch (error) {
+    result.ig_publish_dry_run = {
+      fetch_error: error instanceof Error ? error.message : String(error),
+    };
+  }
 
   // 6) 비교 — env 의 IG_BUSINESS_ID 가 FB Page 에 연결된 IG 와 같은지
   const fbPageBody = (result.fb_page as FetchResult).body as
