@@ -437,11 +437,17 @@ export async function publishInstagramReel(
     console.error(
       `[meta] ❌ Instagram error object: ${serializeUnknownError(error)}`,
     );
+
+    // Hobby 의 1h 로그 보존을 우회하고 진단 시 raw subcode 를 바로 확인할 수
+    // 있도록 GraphApiError 의 raw body 를 DB error_message 에 함께 저장한다.
+    let dbErrorMessage = message;
     if (error instanceof GraphApiError) {
       console.error(
         `[meta] ❌ Instagram Graph API 에러 상세: status=${error.status}, method=${error.method}, path=${error.path}, graph_code=${error.graphCode ?? "unknown"}`,
       );
       console.error(`[meta] ❌ Instagram Graph raw response: ${error.rawBody}`);
+      const rawSnippet = (error.rawBody ?? "").slice(0, 1500);
+      dbErrorMessage = `${message}\n--- raw ---\n${rawSnippet}`;
     }
 
     if (input.recordResult !== false) {
@@ -452,7 +458,7 @@ export async function publishInstagramReel(
         externalId: null,
         storagePath: input.storagePath ?? null,
         captionPreview: input.caption.slice(0, 200),
-        errorMessage: message,
+        errorMessage: dbErrorMessage,
       });
     }
 
