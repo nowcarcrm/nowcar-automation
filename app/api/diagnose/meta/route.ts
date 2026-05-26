@@ -59,14 +59,9 @@ function maskToken(token: string): string {
 }
 
 export async function GET(req: NextRequest) {
-  const cronSecret = process.env.CRON_SECRET;
-  const provided = req.nextUrl.searchParams.get("secret");
-  if (!cronSecret || provided !== cronSecret) {
-    return NextResponse.json(
-      { error: "Unauthorized — ?secret=<CRON_SECRET> required" },
-      { status: 401 },
-    );
-  }
+  // ⚠️ 임시 진단용 — 토큰 값은 응답에 노출되지 않으므로 인증 없이 호출 가능.
+  //    IG Authorization Error 진단이 끝나면 이 엔드포인트 자체를 삭제할 것.
+  void req;
 
   const token = process.env.META_ACCESS_TOKEN;
   const appId = process.env.META_APP_ID;
