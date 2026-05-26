@@ -119,43 +119,66 @@ export async function GET(req: NextRequest) {
       `&access_token=${encodeURIComponent(token)}`,
   );
 
-  // 6) 실제 IG REELS 컨테이너 생성 시뮬레이션 — 발행 시점 raw 에러 캡처
-  //    의도적으로 video_url 을 빈 값으로 두지 않고, 명백히 다운로드 가능한 작은
-  //    Supabase 공개 영상(있다면) 또는 더미 URL 로 시도. 우리가 보고 싶은 건
-  //    "video_url unreachable" 같은 정상 에러인지, 아니면 "Authorization" 인지.
-  const dummyVideoUrl =
+  // 6) IG REELS 컨테이너 생성 변수 격리 — caption vs video_url 어느 쪽이
+  //    "Authorization Error" 의 진짜 원인인지 4가지 변형으로 격리한다.
+  const SAFE_VIDEO =
     "https://entxwtgcgmviafyzcgdn.supabase.co/storage/v1/object/public/temp-videos/U0qK9XLTrks.mp4";
-  const containerBody = new URLSearchParams({
-    media_type: "REELS",
-    video_url: dummyVideoUrl,
-    caption: "[diagnose] do-not-publish test container — auto cleanup",
-    access_token: token,
-  });
-  try {
-    const containerResp = await fetch(`${GRAPH}/${igId}/media`, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: containerBody,
+  const FAILED_VIDEO =
+    "https://entxwtgcgmviafyzcgdn.supabase.co/storage/v1/object/public/temp-videos/wbdvTTgtvbc.mp4";
+  const SIMPLE_CAPTION = "[diagnose] do-not-publish test container — auto cleanup";
+  const REAL_CAPTION_BODY =
+    "⚠️ 6월, 신차 출고 대란 시작됐습니다.\n\n지금 움직이지 않으면 차 못 받습니다.\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n📌 나우카가 직접 확인한 핵심 3가지\n\n✅ 즉시 출고 가능 재고 — 나우카 보유량 전국 No.1\n✅ 장기렌트 · 리스 전국 최저가 직접 비교 견적\n✅ 중간 딜러 없이 금융기관 직연결 → 투명한 조건\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n🚗 국산차(현대·기아·제네시스 등) → 장기렌트 추천\n🚗 수입차(BMW·벤츠·아우디 등) → 리스 추천\n\n⏰ 정확한 출고 대기기간은 차종별로 상이하니,\n견적 문의 시 실시간 재고 확인해드립니다. 1666-3230\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n📞 1666-3230\n💬 카톡 '나우카'\n🌐 www.나우카.com\n🎬 유튜브 '나우카'\n☕ 네이버카페 '초대박신차의성지'\n\n#신차장기렌트 #신차리스 #장기렌트 #리스 #나우카 #출고대란 #즉시출고 #신차출고 #장기렌트추천 #리스추천 #수입차리스 #국산차장기렌트 #전국최저가 #신차견적 #6월신차";
+
+  async function tryContainer(
+    label: string,
+    videoUrl: string,
+    caption: string,
+  ): Promise<unknown> {
+    const body = new URLSearchParams({
+      media_type: "REELS",
+      video_url: videoUrl,
+      caption,
+      access_token: token!,
     });
-    const raw = await containerResp.text();
-    let parsed: unknown = raw;
     try {
-      parsed = raw ? JSON.parse(raw) : null;
-    } catch {
-      // keep raw
+      const resp = await fetch(`${GRAPH}/${igId}/media`, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body,
+      });
+      const raw = await resp.text();
+      let parsed: unknown = raw;
+      try {
+        parsed = raw ? JSON.parse(raw) : null;
+      } catch {
+        // keep raw
+      }
+      return { label, ok: resp.ok, status: resp.status, body: parsed };
+    } catch (error) {
+      return {
+        label,
+        fetch_error: error instanceof Error ? error.message : String(error),
+      };
     }
-    result.ig_publish_dry_run = {
-      ok: containerResp.ok,
-      status: containerResp.status,
-      body: parsed,
-      note:
-        "이 요청은 컨테이너만 생성하고 publish 는 안 합니다. 컨테이너가 만들어지면 24h 후 자동 만료.",
-    };
-  } catch (error) {
-    result.ig_publish_dry_run = {
-      fetch_error: error instanceof Error ? error.message : String(error),
-    };
   }
+
+  result.ig_isolation = {
+    A_baseline_simple_safe: await tryContainer("A", SAFE_VIDEO, SIMPLE_CAPTION),
+    B_replica_real_failed: await tryContainer("B", FAILED_VIDEO, REAL_CAPTION_BODY),
+    C_simple_caption_failed_video: await tryContainer("C", FAILED_VIDEO, SIMPLE_CAPTION),
+    D_real_caption_safe_video: await tryContainer("D", SAFE_VIDEO, REAL_CAPTION_BODY),
+    interpretation: {
+      A_only_ok:
+        "→ caption 도 video 도 좋음 (baseline). A 만 OK 면 다른 변수가 원인 아님",
+      B_fail: "→ 실제 실패 케이스 재현 성공. 격리 시작",
+      C_fail_only:
+        "→ video 가 원인 (wbdv mp4 파일 자체 문제: 코덱/해상도/길이)",
+      D_fail_only: "→ caption 이 원인 (URL/이모지/한글/길이/spam-pattern)",
+      BC_fail_AD_ok: "→ video 가 원인",
+      BD_fail_AC_ok: "→ caption 이 원인",
+      all_fail: "→ token/계정 차원의 문제 (현재 가설과 모순)",
+    },
+  };
 
   // 6) 비교 — env 의 IG_BUSINESS_ID 가 FB Page 에 연결된 IG 와 같은지
   const fbPageBody = (result.fb_page as FetchResult).body as
