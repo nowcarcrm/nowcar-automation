@@ -473,7 +473,10 @@ export async function publishInstagramReel(
     return {
       success: false,
       platform: "instagram",
-      errorMessage: message,
+      // dbErrorMessage 는 friendly message + raw body 포함. recordResult=false
+      // 인 경우(예: publish-meta) publish-meta 가 이 errorMessage 를 그대로
+      // social_publishes.error_message 에 저장하므로 raw body 가 보존된다.
+      errorMessage: dbErrorMessage,
     };
   }
 }
