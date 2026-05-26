@@ -16,6 +16,10 @@ import {
   publishThreadsPost,
 } from "@/lib/meta";
 import { getVideoDurationSeconds } from "@/lib/youtube";
+import {
+  isBotBlockError,
+  notifyBotBlockIfNeeded,
+} from "@/lib/youtube-bot-detect";
 
 /**
  * ============================================================
@@ -215,11 +219,14 @@ async function ensureVideoDownloaded(video: VideoRow): Promise<string | null> {
     const msg = error instanceof Error ? error.message : String(error);
     console.error(`[publish-meta] ❌ 인라인 다운로드 실패: ${msg}`);
 
+    // A 안: 봇차단(쿠키 만료) 의심 → attempts 증가 안 함 + 알림 발송(throttled).
+    const botBlock = isBotBlockError(msg);
+    const nextAttempts = botBlock ? attempts : attempts + 1;
     const truncated = msg.slice(0, 500);
     const { error: updateError } = await supabase
       .from("youtube_videos")
       .update({
-        download_attempts: attempts + 1,
+        download_attempts: nextAttempts,
         download_error: truncated,
         last_download_error: truncated,
         last_download_error_at: new Date().toISOString(),
@@ -229,6 +236,19 @@ async function ensureVideoDownloaded(video: VideoRow): Promise<string | null> {
     if (updateError) {
       console.warn(
         `[publish-meta] 다운로드 실패 기록도 실패(진행은 계속): ${updateError.message}`,
+      );
+    }
+
+    if (botBlock) {
+      console.warn(
+        `[publish-meta] 🍪 봇차단 감지(${video.video_id}) → attempts 유지(${nextAttempts}). 쿠키 갱신 시 자동 재시도.`,
+      );
+      const alertResult = await notifyBotBlockIfNeeded({
+        failedVideos: [{ video_id: video.video_id, title: video.title }],
+        sampleError: msg,
+      });
+      console.log(
+        `[publish-meta] 🍪 봇차단 알림 처리: sent=${alertResult.sent} reason=${alertResult.reason}`,
       );
     }
     return null;

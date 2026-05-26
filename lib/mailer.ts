@@ -184,6 +184,67 @@ export async function sendContentEmail(
   }
 }
 
+export interface CookieExpiredAlertInput {
+  failedVideos: Array<{ video_id: string; title: string | null }>;
+  sampleError: string;
+}
+
+export async function sendCookieExpiredAlert(
+  input: CookieExpiredAlertInput,
+): Promise<void> {
+  const { failedVideos, sampleError } = input;
+  const listHtml = failedVideos.length
+    ? `<ul style="margin:8px 0;padding-left:20px;">${failedVideos
+        .slice(0, 10)
+        .map(
+          (v) =>
+            `<li><code>${escapeHtml(v.video_id)}</code>${
+              v.title ? ` — ${escapeHtml(v.title)}` : ""
+            }</li>`,
+        )
+        .join("")}</ul>`
+    : "";
+
+  const html = `
+    <div style="max-width:720px;margin:0 auto;padding:20px;color:#111827;font-family:'Malgun Gothic','Apple SD Gothic Neo',Arial,sans-serif;">
+      <div style="border:2px solid #dc2626;border-radius:12px;padding:18px;background:#fef2f2;">
+        <h1 style="margin:0 0 10px 0;font-size:20px;color:#991b1b;">🚨 YouTube 쿠키 만료 감지</h1>
+        <p style="margin:0 0 10px 0;line-height:1.6;">
+          데이터센터 IP 봇 감지로 영상 다운로드가 실패했습니다. Vercel 환경변수
+          <b>YOUTUBE_COOKIES</b> 를 갱신해 주세요.
+        </p>
+        <h3 style="margin:14px 0 6px 0;font-size:15px;">📋 갱신 절차</h3>
+        <ol style="margin:0;padding-left:20px;line-height:1.7;">
+          <li>Chrome 에서 youtube.com 로그인 (자동발행용 계정)</li>
+          <li>Cookie-Editor 확장 → Export → JSON</li>
+          <li>JSON 한 줄로 minify 후 Vercel <b>YOUTUBE_COOKIES</b> 교체</li>
+          <li>Redeploy → 봇 차단 해제까지 보통 1 사이클 내 자동 복구</li>
+        </ol>
+        <h3 style="margin:14px 0 6px 0;font-size:15px;">⏸ 영향받은 영상</h3>
+        ${listHtml || "<p style='margin:0;'>-</p>"}
+        <h3 style="margin:14px 0 6px 0;font-size:15px;">📄 마지막 에러</h3>
+        <pre style="margin:0;padding:10px;background:#fff;border:1px solid #fecaca;border-radius:8px;white-space:pre-wrap;word-break:break-word;font-size:12px;">${escapeHtml(sampleError)}</pre>
+        <p style="margin:14px 0 0 0;color:#6b7280;font-size:12px;">
+          이 메일은 봇차단 감지 후 6시간 cooldown 으로 발송됩니다.
+          쿠키 갱신만 하면 별도 SQL 리셋 없이 다음 cron 사이클에 자동 재시도됩니다.
+        </p>
+      </div>
+    </div>
+  `;
+
+  try {
+    await transporter.sendMail({
+      from: `"Nowcar Auto" <${emailUser}>`,
+      to: emailUser,
+      subject: "[나우카 자동화] 🚨 YOUTUBE_COOKIES 갱신 필요 (봇차단 감지)",
+      html,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "알 수 없는 오류";
+    throw new Error(`[mailer] 쿠키 만료 알림 발송 실패: ${message}`);
+  }
+}
+
 export async function sendToTistory(content: GeneratedContent): Promise<void> {
   if (!autoPublishTistory) {
     throw new Error(
