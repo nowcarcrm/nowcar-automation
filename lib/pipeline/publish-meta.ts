@@ -20,6 +20,7 @@ import {
   isBotBlockError,
   notifyBotBlockIfNeeded,
 } from "@/lib/youtube-bot-detect";
+import { ensureMetaTokenLoaded } from "@/lib/meta-token";
 
 /**
  * ============================================================
@@ -371,6 +372,21 @@ export async function runPublishMetaStep(): Promise<PublishMetaResult> {
       "[publish-meta] ⏭  AUTO_PUBLISH_INSTAGRAM/FACEBOOK/THREADS 모두 비활성 → 전체 스킵",
     );
     return result;
+  }
+
+  // Meta long-lived token prime/refresh. cron/download 진입부에서도 호출하지만,
+  // pipeline/run 이 cron 외 경로로 트리거됐을 때를 대비해 여기서도 한 번.
+  // 같은 invocation 안에서 두 번 호출되어도 DB 캐시 hit 로 비용은 작음.
+  try {
+    const tokenResult = await ensureMetaTokenLoaded();
+    console.log(
+      `[publish-meta] 🔑 Meta token: status=${tokenResult.status} expiresAt=${tokenResult.expiresAt ?? "-"}`,
+    );
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    console.warn(
+      `[publish-meta] ⚠ Meta token prime 단계 실패(env 토큰 사용): ${msg}`,
+    );
   }
 
   const supabase = createAdminClient();

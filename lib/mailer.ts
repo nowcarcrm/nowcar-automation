@@ -245,6 +245,45 @@ export async function sendCookieExpiredAlert(
   }
 }
 
+export async function sendMetaTokenRefreshFailedAlert(
+  errorMessage: string,
+): Promise<void> {
+  const html = `
+    <div style="max-width:720px;margin:0 auto;padding:20px;color:#111827;font-family:'Malgun Gothic','Apple SD Gothic Neo',Arial,sans-serif;">
+      <div style="border:2px solid #dc2626;border-radius:12px;padding:18px;background:#fef2f2;">
+        <h1 style="margin:0 0 10px 0;font-size:20px;color:#991b1b;">🚨 Meta 토큰 자동 갱신 실패</h1>
+        <p style="margin:0 0 10px 0;line-height:1.6;">
+          Meta Graph API 의 long-lived token 자동 갱신(fb_exchange_token)이 실패했습니다.
+          현재 토큰이 만료되기 전에 수동 조치가 필요합니다.
+        </p>
+        <h3 style="margin:14px 0 6px 0;font-size:15px;">⚙️ 점검 항목</h3>
+        <ul style="margin:0;padding-left:20px;line-height:1.7;">
+          <li>Vercel <b>META_APP_ID</b> / <b>META_APP_SECRET</b> 값이 정확한가</li>
+          <li>현재 <b>META_ACCESS_TOKEN</b> 이 이미 만료되어 exchange 가 안 되는가</li>
+          <li>Meta 앱 권한(<code>instagram_content_publish</code>, <code>pages_manage_posts</code>) 이 살아있는가</li>
+        </ul>
+        <h3 style="margin:14px 0 6px 0;font-size:15px;">📄 에러</h3>
+        <pre style="margin:0;padding:10px;background:#fff;border:1px solid #fecaca;border-radius:8px;white-space:pre-wrap;word-break:break-word;font-size:12px;">${escapeHtml(errorMessage)}</pre>
+        <p style="margin:14px 0 0 0;color:#6b7280;font-size:12px;">
+          12시간 cooldown. 갱신이 정상 작동하면 자동으로 중단됩니다.
+        </p>
+      </div>
+    </div>
+  `;
+
+  try {
+    await transporter.sendMail({
+      from: `"Nowcar Auto" <${emailUser}>`,
+      to: emailUser,
+      subject: "[나우카 자동화] 🚨 Meta 토큰 자동 갱신 실패",
+      html,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "알 수 없는 오류";
+    throw new Error(`[mailer] Meta 토큰 갱신 실패 알림 발송 실패: ${message}`);
+  }
+}
+
 export async function sendToTistory(content: GeneratedContent): Promise<void> {
   if (!autoPublishTistory) {
     throw new Error(
