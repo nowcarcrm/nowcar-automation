@@ -119,43 +119,77 @@ export async function GET(req: NextRequest) {
       `&access_token=${encodeURIComponent(token)}`,
   );
 
-  // 6) 실제 IG REELS 컨테이너 생성 시뮬레이션 — 발행 시점 raw 에러 캡처
-  //    의도적으로 video_url 을 빈 값으로 두지 않고, 명백히 다운로드 가능한 작은
-  //    Supabase 공개 영상(있다면) 또는 더미 URL 로 시도. 우리가 보고 싶은 건
-  //    "video_url unreachable" 같은 정상 에러인지, 아니면 "Authorization" 인지.
-  const dummyVideoUrl =
+  // 6) IG REELS 컨테이너 생성 변수 격리 — caption vs video_url 중 어느 쪽이
+  //    "Authorization Error" 의 진짜 원인인지 4가지 변형으로 격리한다.
+  const SAFE_VIDEO =
     "https://entxwtgcgmviafyzcgdn.supabase.co/storage/v1/object/public/temp-videos/U0qK9XLTrks.mp4";
-  const containerBody = new URLSearchParams({
-    media_type: "REELS",
-    video_url: dummyVideoUrl,
-    caption: "[diagnose] do-not-publish test container — auto cleanup",
-    access_token: token,
-  });
-  try {
-    const containerResp = await fetch(`${GRAPH}/${igId}/media`, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: containerBody,
+  const FAILED_VIDEO =
+    "https://entxwtgcgmviafyzcgdn.supabase.co/storage/v1/object/public/temp-videos/wbdvTTgtvbc.mp4";
+  const SIMPLE_CAPTION =
+    "[diagnose] do-not-publish test container — auto cleanup";
+  const REAL_CAPTION_BODY =
+    "⚠️ 6월, 신차 출고 대란 시작됐습니다.\n\n지금 움직이지 않으면 차 못 받습니다.\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n📌 나우카가 직접 확인한 핵심 3가지\n\n✅ 즉시 출고 가능 재고\n✅ 장기렌트 · 리스 전국 최저가 직접 비교 견적\n✅ 중간 딴러 없이 금융기관 직연결\n\n🌐 www.나우카.com\n🎬 유튜브 '나우카'\n☕ 네이버카페 '초대박신차의성지'\n\n#신차장기렌트 #신차리스 #장기렌트 #리스 #나우카";
+
+  async function tryContainer(
+    label: string,
+    videoUrl: string,
+    caption: string,
+  ): Promise<unknown> {
+    const body = new URLSearchParams({
+      media_type: "REELS",
+      video_url: videoUrl,
+      caption,
+      access_token: token!,
     });
-    const raw = await containerResp.text();
-    let parsed: unknown = raw;
     try {
-      parsed = raw ? JSON.parse(raw) : null;
-    } catch {
-      // keep raw
+      const resp = await fetch(`${GRAPH}/${igId}/media`, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body,
+      });
+      const raw = await resp.text();
+      let parsed: unknown = raw;
+      try {
+        parsed = raw ? JSON.parse(raw) : null;
+      } catch {
+        // keep raw
+      }
+      return { label, ok: resp.ok, status: resp.status, body: parsed };
+    } catch (error) {
+      return {
+        label,
+        fetch_error: error instanceof Error ? error.message : String(error),
+      };
     }
-    result.ig_publish_dry_run = {
-      ok: containerResp.ok,
-      status: containerResp.status,
-      body: parsed,
-      note:
-        "이 요청은 컨테이너만 생성하고 publish 는 안 합니다. 컨테이너가 만들어지면 24h 후 자동 만료.",
-    };
-  } catch (error) {
-    result.ig_publish_dry_run = {
-      fetch_error: error instanceof Error ? error.message : String(error),
-    };
   }
+
+  result.ig_isolation = {
+    A_baseline_simple_safe: await tryContainer("A", SAFE_VIDEO, SIMPLE_CAPTION),
+    B_replica_real_failed: await tryContainer(
+      "B",
+      FAILED_VIDEO,
+      REAL_CAPTION_BODY,
+    ),
+    C_simple_caption_failed_video: await tryContainer(
+      "C",
+      FAILED_VIDEO,
+      SIMPLE_CAPTION,
+    ),
+    D_real_caption_safe_video: await tryContainer(
+      "D",
+      SAFE_VIDEO,
+      REAL_CAPTION_BODY,
+    ),
+    interpretation: {
+      legend:
+        "A=safe baseline / B=publish-meta 실패 케이스 재현 / C=video 단독 영향 / D=caption 단독 영향",
+      A_only_ok_others_fail:
+        "→ 인터랙션 (caption+video 조합) 또는 redis 캐시처럼 다른 변수",
+      BC_fail_AD_ok: "→ video 가 원인 (wbdv mp4 자체 문제)",
+      BD_fail_AC_ok: "→ caption 이 원인 (URL/이모지/한글/spam-pattern)",
+      all_fail: "→ token/계정 차원의 문제 (현재 가설과 모순)",
+    },
+  };
 
   // 6) 비교 — env 의 IG_BUSINESS_ID 가 FB Page 에 연결된 IG 와 같은지
   const fbPageBody = (result.fb_page as FetchResult).body as

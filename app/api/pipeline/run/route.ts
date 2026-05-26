@@ -83,14 +83,13 @@ function toErrorMessage(error: unknown): string {
 export async function GET(request: NextRequest) {
   const pipelineId = crypto.randomUUID();
   const skipEmail = request.nextUrl.searchParams.get("skip_email") === "true";
-  const force = request.nextUrl.searchParams.get("force") === "true";
   const startedAt = Date.now();
   const errors: string[] = [];
 
   console.log("🚀 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
   console.log("🚀 나우카 자동화 파이프라인 시작");
   console.log("🚀 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-  console.log(`[pipeline] pipeline_id=${pipelineId}, skip_email=${skipEmail}, force=${force}`);
+  console.log(`[pipeline] pipeline_id=${pipelineId}, skip_email=${skipEmail}`);
 
   const step1: DetectStepResult = {
     status: "skipped",
@@ -280,7 +279,19 @@ export async function GET(request: NextRequest) {
       step4.duration_seconds = Math.round((Date.now() - step5StartedAt) / 1000);
     } else {
       console.log("[5/5] 📧 이메일 발송 중...");
-      const tistoryCandidates = await getPendingTistoryContents();
+      // Bug fix: AUTO_PUBLISH_TISTORY=false 면 tistory pending 자체를 가져오지 않는다.
+      // 안 그러면 매 사이클마다 모든 tistory pending row 가 sendToTistory 의 가드에서
+      // throw → errors 배열에 수십 개 누적되는 노이즈가 쌓인다. 정책상 off 면 실제로
+      // 시도조차 하지 말 것.
+      const tistoryEnabled = process.env.AUTO_PUBLISH_TISTORY === "true";
+      const tistoryCandidates = tistoryEnabled
+        ? await getPendingTistoryContents()
+        : [];
+      if (!tistoryEnabled) {
+        console.log(
+          "[5/5] ⏭ AUTO_PUBLISH_TISTORY != true — 티스토리 발행 단계 자체 스킵",
+        );
+      }
       const data = await runEmailStep();
 
       if (!data.has_pending_email) {
@@ -331,14 +342,18 @@ export async function GET(request: NextRequest) {
   }
 
   const elapsedSeconds = Math.round((Date.now() - startedAt) / 1000);
-  const failedStepCount = [
+  const stepStatuses = [
     step1.status,
     step2.status,
     step3.status,
-    step5.status,
-    step4.status,
-  ].filter((status) => status === "error").length;
-  const success = failedStepCount < 5;
+    step5.status, // 변수명 step5 는 실제 카페 단계 (가독성 부채, 추후 리네이밍)
+    step4.status, // 변수명 step4 는 실제 이메일 단계
+  ];
+  const failedStepCount = stepStatuses.filter((s) => s === "error").length;
+  // Bug fix: 이전엔 `failedStepCount < 5` 라 5개 모두 error 일 때만 success=false 였음.
+  // 부분 실패도 success=true 로 보고되어 모니터링 시 fail 을 놓치는 문제.
+  // 한 개라도 error 면 success=false 로 엄격화.
+  const success = failedStepCount === 0;
 
   const summary = success
     ? `✅ 신규 영상 ${step1.new_videos_count}개 → 콘텐츠 ${step2.total_contents_generated}개 생성 → 인스타 ${step3.instagram_published_count}건/페북 ${step3.facebook_published_count}건 발행 → 카페 ${step5.naver_cafe_published_count}건 발행 → 이메일 ${step4.emails_sent_count}통 발송`

@@ -301,26 +301,35 @@ export async function GET() {
         }
       }
 
+      // Bug fix: 콘텐츠 저장이 실패하면 markVideoProcessed 도 호출하지 않는다.
+      // 그렇지 않으면 generated_contents 0건이지만 processed=true 인 영구 누락
+      // 상태가 됨 (2026-05-21~24 영상 4건이 그렇게 사라졌던 사고).
+      let savedOk = false;
       try {
         await saveGeneratedContents(rowsToInsert);
+        savedOk = true;
         console.log(
-          `[content/generate] generated_contents 저장 완료: ${video.title} (5건)`,
+          `[content/generate] generated_contents 저장 완료: ${video.title} (${rowsToInsert.length}건)`,
         );
       } catch (error) {
         const message = toErrorMessage(error);
         errors.push(`[video_id=${video.video_id}] 콘텐츠 저장 실패: ${message}`);
-        console.error(`[content/generate] DB 저장 실패: ${video.title} - ${message}`);
+        console.error(
+          `[content/generate] DB 저장 실패 → processed 마킹 보류(다음 사이클 재시도): ${video.title} - ${message}`,
+        );
       }
 
-      try {
-        await markVideoProcessed(video.id);
-        console.log(`[content/generate] 영상 처리 완료 표시: ${video.title}`);
-      } catch (error) {
-        const message = toErrorMessage(error);
-        errors.push(`[video_id=${video.video_id}] processed 업데이트 실패: ${message}`);
-        console.error(
-          `[content/generate] processed 업데이트 실패: ${video.title} - ${message}`,
-        );
+      if (savedOk) {
+        try {
+          await markVideoProcessed(video.id);
+          console.log(`[content/generate] 영상 처리 완료 표시: ${video.title}`);
+        } catch (error) {
+          const message = toErrorMessage(error);
+          errors.push(`[video_id=${video.video_id}] processed 업데이트 실패: ${message}`);
+          console.error(
+            `[content/generate] processed 업데이트 실패: ${video.title} - ${message}`,
+          );
+        }
       }
 
       results.push({
