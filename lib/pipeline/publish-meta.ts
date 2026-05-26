@@ -762,14 +762,15 @@ export async function runPublishMetaStep(): Promise<PublishMetaResult> {
         );
         result.threads_skipped_count += 1;
       } else {
+        // Threads 는 자체 마케터 톤(반말·4단 구조)이 필수. 인스타 캡션으로
+        // 폴백하면 톤 정책 위반(존댓말·CTA·이모지 박스 등) → 스킵 + 에러 로깅.
+        // [[project_threads_auto_marketer_tone]], [[feedback_threads_marketer_prompt]]
         const caption = thContent?.body
           ? buildThreadsCaption(thContent.body, thContent.hashtags)
-          : igContent?.body
-            ? buildThreadsCaption(igContent.body, igContent.hashtags)
-            : null;
+          : null;
 
         if (!caption) {
-          const msg = `스레드 스킵(${video.video_id}): threads/instagram 캡션 소스가 없음`;
+          const msg = `스레드 스킵(${video.video_id}): threads 채널 콘텐츠가 없거나 생성 실패. 인스타 캡션 폴백은 톤 정책 위반이라 사용하지 않음.`;
           console.warn(`[publish-meta] ⚠️  ${msg}`);
           result.errors.push(msg);
           result.threads_skipped_count += 1;
