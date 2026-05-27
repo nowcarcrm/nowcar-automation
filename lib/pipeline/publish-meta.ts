@@ -106,9 +106,9 @@ function toErrorMessage(error: unknown): string {
 
 function getPendingTtlMinutes(): number {
   const raw = process.env.PUBLISH_PENDING_TTL_MINUTES;
-  if (!raw) return 10;
+  if (!raw) return 20;
   const parsed = Number(raw);
-  if (!Number.isFinite(parsed) || parsed <= 0) return 10;
+  if (!Number.isFinite(parsed) || parsed <= 0) return 20;
   return Math.floor(parsed);
 }
 
@@ -327,7 +327,7 @@ async function updatePublishPendingToFinal(params: {
   captionPreview: string | null;
 }): Promise<void> {
   const supabase = createAdminClient();
-  const { error } = await supabase
+  const { data, error } = await supabase
     .from("social_publishes")
     .update({
       status: params.status,
@@ -339,10 +339,17 @@ async function updatePublishPendingToFinal(params: {
     .eq("video_id", params.videoId)
     .eq("platform", params.platform)
     .eq("status", "pending")
-    .is("deleted_at", null);
+    .is("deleted_at", null)
+    .select("id");
 
   if (error) {
     throw new Error(`pending -> ${params.status} 상태 업데이트 실패: ${error.message}`);
+  }
+
+  if (!data || data.length === 0) {
+    console.warn(
+      `[publish-meta] ⚠️ pending 행 미발견 (race condition 가능): video=${params.videoId}, platform=${params.platform}, target=${params.status}`,
+    );
   }
 }
 

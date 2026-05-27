@@ -285,8 +285,30 @@ export async function runPublishNaverCafeStep(): Promise<PublishNaverCafeResult>
       .map((r) => r.video_id),
   );
 
+  const MAX_NAVER_FAIL_RETRIES = 5;
+  const { data: failedRows } = await supabase
+    .from("social_publishes")
+    .select("video_id")
+    .in("video_id", videoIds)
+    .eq("platform", "naver_cafe")
+    .eq("status", "failed")
+    .is("deleted_at", null);
+  const failCountByVideo = new Map<string, number>();
+  for (const r of failedRows ?? []) {
+    failCountByVideo.set(r.video_id, (failCountByVideo.get(r.video_id) ?? 0) + 1);
+  }
+
   for (const video of videos as VideoRow[]) {
     if (alreadyBlocked.has(video.video_id)) {
+      result.naver_cafe_skipped_count += 1;
+      continue;
+    }
+
+    const failCount = failCountByVideo.get(video.video_id) ?? 0;
+    if (failCount >= MAX_NAVER_FAIL_RETRIES) {
+      console.log(
+        `[publish-naver-cafe] ⏭ skip: video_id=${video.video_id}, reason=failed ${failCount} times (max=${MAX_NAVER_FAIL_RETRIES})`,
+      );
       result.naver_cafe_skipped_count += 1;
       continue;
     }
