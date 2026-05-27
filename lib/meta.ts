@@ -218,7 +218,10 @@ async function callGraphApi<T>(
 ): Promise<T> {
   const url = new URL(`${baseUrl}${path}`);
 
-  const init: RequestInit = { method };
+  const init: RequestInit = {
+    method,
+    signal: AbortSignal.timeout(60_000),
+  };
   if (method === "GET") {
     for (const [key, value] of Object.entries(params)) {
       url.searchParams.set(key, value);
@@ -625,9 +628,9 @@ async function finishFacebookReelsPublish(
       `[fb-reels:3-finish] 응답에 post_id/video_id 없음: ${JSON.stringify(data)}`,
     );
   }
-  if (data.success === false) {
+  if (data.success !== true) {
     throw new Error(
-      `[fb-reels:3-finish] success=false, message=${data.message ?? "unknown"}`,
+      `[fb-reels:3-finish] success=${data.success ?? "missing"}, message=${data.message ?? "unknown"}`,
     );
   }
 
