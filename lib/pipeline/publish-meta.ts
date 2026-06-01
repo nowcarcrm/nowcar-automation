@@ -26,6 +26,7 @@ import {
   isPastLocalWorkerGrace,
   LOCAL_WORKER_GRACE_MINUTES,
 } from "@/lib/download-grace";
+import { getMaxVideoAgeDays, recencyCutoffIso } from "@/lib/video-recency";
 
 /**
  * ============================================================
@@ -438,12 +439,18 @@ export async function runPublishMetaStep(): Promise<PublishMetaResult> {
   //    duration 게이트: duration_seconds 가 채워져 있으면서 max 를 초과한 영상은
   //    SQL 단계에서 아예 제외한다. NULL(레거시/미수집) 은 통과시키고 영상 loop
   //    안에서 lazy backfill 후 다시 판정한다.
+  // recency 게이트(방어선): published_at 이 윈도우(기본 14일)보다 오래된 영상은
+  // 발행 후보에서 제외한다. 감지 단계(youtube/check)에서 이미 1차로 막지만,
+  // 게이트 도입 전에 이미 저장돼 아직 미발행 상태로 남은 옛날 영상이 다음
+  // 사이클에 SNS 로 나가는 것까지 차단하기 위함. 배경: lib/video-recency.ts
+  const recencyCutoff = recencyCutoffIso();
   const { data: candidateVideos, error: videosError } = await supabase
     .from("youtube_videos")
     .select(
       "id, video_id, title, video_url, storage_path, download_attempts, duration_seconds, created_at",
     )
     .eq("processed", true)
+    .gte("published_at", recencyCutoff)
     .or(`duration_seconds.is.null,duration_seconds.lte.${maxShortSeconds}`)
     .order("created_at", { ascending: false })
     .limit(SELECT_PAGE_SIZE);
@@ -458,7 +465,7 @@ export async function runPublishMetaStep(): Promise<PublishMetaResult> {
   }
 
   console.log(
-    `[publish-meta] 📋 후보 영상 ${candidateVideos.length}개 (ig=${igEnabled}, fb=${fbEnabled}, th=${thEnabled}, max_seconds=${maxShortSeconds}, max_per_run=${MAX_VIDEOS_PER_RUN})`,
+    `[publish-meta] 📋 후보 영상 ${candidateVideos.length}개 (ig=${igEnabled}, fb=${fbEnabled}, th=${thEnabled}, max_seconds=${maxShortSeconds}, max_age_days=${getMaxVideoAgeDays()}, max_per_run=${MAX_VIDEOS_PER_RUN})`,
   );
 
   // 2) 이미 성공했거나, TTL 내 pending인 (video_id, platform) 조합 조회 → 중복 발행 방지

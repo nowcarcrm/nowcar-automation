@@ -5,6 +5,7 @@ import {
   publishNaverCafeArticle,
 } from "@/lib/naver";
 import { createAdminClient } from "@/lib/storage";
+import { recencyCutoffIso } from "@/lib/video-recency";
 
 export interface PublishNaverCafeResult {
   ok: boolean;
@@ -236,10 +237,14 @@ export async function runPublishNaverCafeStep(): Promise<PublishNaverCafeResult>
     return result;
   }
 
+  // recency 게이트(방어선): published_at 이 윈도우(기본 14일)보다 오래된 영상은
+  // 카페 발행 후보에서 제외. 감지 단계에서 1차 차단하지만, 게이트 도입 전에
+  // 이미 저장된 옛날 영상의 재발행까지 막는다. 배경: lib/video-recency.ts
   const { data: videos, error: videosError } = await supabase
     .from("youtube_videos")
     .select("id, video_id, title, video_url, created_at")
     .eq("processed", true)
+    .gte("published_at", recencyCutoffIso())
     .order("created_at", { ascending: false })
     .limit(SELECT_PAGE_SIZE);
 

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getLatestVideos, getVideoTranscript } from "@/lib/youtube";
 import { saveVideo, supabase } from "@/lib/supabase";
+import { getMaxVideoAgeDays, isWithinRecency } from "@/lib/video-recency";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -64,13 +65,34 @@ export async function GET() {
     }
 
     const existingVideoIdSet = new Set((existingRows ?? []).map((row) => row.video_id));
-    const newCandidates = latestVideos.filter(
+    const unseenCandidates = latestVideos.filter(
       (video) => !existingVideoIdSet.has(video.videoId),
     );
-    const existingCount = totalChecked - newCandidates.length;
+
+    // recency 게이트: published_at 이 윈도우(기본 14일)보다 오래된 영상은
+    // 신규로 잡혔더라도 저장하지 않는다. YouTube search.list 가 옛날 영상을
+    // 결과에 다시 끼워 넣어 1년 전 영상이 SNS 에 재발행되던 사고(2026-06-01)
+    // 의 근본 차단. 자세한 배경은 lib/video-recency.ts 참고.
+    const maxAgeDays = getMaxVideoAgeDays();
+    const staleCandidates = unseenCandidates.filter(
+      (video) => !isWithinRecency(video.publishedAt),
+    );
+    const newCandidates = unseenCandidates.filter((video) =>
+      isWithinRecency(video.publishedAt),
+    );
+    const existingCount = totalChecked - unseenCandidates.length;
+
+    if (staleCandidates.length > 0) {
+      console.log(
+        `[youtube/check] ⏭ 오래된 영상 ${staleCandidates.length}개 제외(>${maxAgeDays}일): ` +
+          staleCandidates
+            .map((v) => `${v.videoId}(${v.publishedAt ?? "?"})`)
+            .join(", "),
+      );
+    }
 
     console.log(
-      `[youtube/check] 신규 영상 ${newCandidates.length}개 발견, 기존 영상 ${existingCount}개`,
+      `[youtube/check] 신규 영상 ${newCandidates.length}개 발견, 기존 영상 ${existingCount}개, 오래됨 ${staleCandidates.length}개 제외`,
     );
 
     for (const video of newCandidates) {
