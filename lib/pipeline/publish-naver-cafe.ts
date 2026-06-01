@@ -6,6 +6,12 @@ import {
 } from "@/lib/naver";
 import { createAdminClient } from "@/lib/storage";
 import { recencyCutoffIso } from "@/lib/video-recency";
+import {
+  CAFE_BLOCK_BACKOFF_HOURS,
+  getNaverCafeBlockState,
+  isNaverCafe999Error,
+  notifyNaverCafeBlockIfNeeded,
+} from "@/lib/naver-cafe-block";
 
 export interface PublishNaverCafeResult {
   ok: boolean;
@@ -209,6 +215,24 @@ export async function runPublishNaverCafeStep(): Promise<PublishNaverCafeResult>
 
   const pendingTtlMinutes = getPendingTtlMinutes();
   const supabase = createAdminClient();
+
+  // 999 차단 서킷 브레이커: 최근 카페 시도가 999 실패이고 backoff 윈도우(기본 6h)
+  // 내면 이번 사이클은 발행을 아예 시도하지 않는다. 차단 상태에서 반복 호출이
+  // 네이버 측 제한을 연장시키는 것을 막기 위함. 윈도우를 넘기면 brake 가 풀려
+  // 1회 probe 가 허용되고, 그 시도가 성공하면 자동 재개된다. 배경: lib/naver-cafe-block.ts
+  const blockState = await getNaverCafeBlockState();
+  if (blockState.blocked) {
+    console.warn(
+      `[publish-naver-cafe] ⛔ 999 차단 감지 → 이번 사이클 발행 보류(backoff ${CAFE_BLOCK_BACKOFF_HOURS}h, last_failed_at=${blockState.lastFailedAt}). 네이버 계정 글쓰기 제한 여부 확인 필요.`,
+    );
+    const alert = await notifyNaverCafeBlockIfNeeded({
+      sampleError: blockState.lastError ?? "naver_cafe 999 block",
+    });
+    console.log(
+      `[publish-naver-cafe] 🔔 차단 알림 처리: sent=${alert.sent} reason=${alert.reason}`,
+    );
+    return result;
+  }
 
   // 하루 1건 hard cap: 최근 MIN_INTERVAL_HOURS 내에 카페 발행 성공이 있으면
   // 이번 사이클은 통째로 스킵. 네이버 카페 어뷰징 감지기에 "하루 1회 이하"
@@ -419,6 +443,11 @@ export async function runPublishNaverCafeStep(): Promise<PublishNaverCafeResult>
           errorMessage: msg,
           captionPreview,
         });
+        // probe 시도가 다시 999 면 차단 지속 → 알림(throttled) + 다음 사이클부터
+        // 서킷 브레이커가 재차단(backoff)한다.
+        if (isNaverCafe999Error(msg)) {
+          await notifyNaverCafeBlockIfNeeded({ sampleError: msg });
+        }
       }
     } catch (error) {
       const msg = toErrorMessage(error);
@@ -449,6 +478,11 @@ export async function runPublishNaverCafeStep(): Promise<PublishNaverCafeResult>
         console.error(
           `[publish-naver-cafe] pending → failed 업데이트 실패: ${toErrorMessage(updateError)}`,
         );
+      }
+
+      // probe 시도가 다시 999 면 차단 지속 → 알림(throttled).
+      if (isNaverCafe999Error(msg)) {
+        await notifyNaverCafeBlockIfNeeded({ sampleError: msg });
       }
     }
   }

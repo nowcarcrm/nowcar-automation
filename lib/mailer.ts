@@ -291,6 +291,46 @@ export async function sendMetaTokenRefreshFailedAlert(
   }
 }
 
+export async function sendNaverCafeBlockedAlert(
+  errorMessage: string,
+): Promise<void> {
+  const html = `
+    <div style="max-width:720px;margin:0 auto;padding:20px;color:#111827;font-family:'Malgun Gothic','Apple SD Gothic Neo',Arial,sans-serif;">
+      <div style="border:2px solid #dc2626;border-radius:12px;padding:18px;background:#fef2f2;">
+        <h1 style="margin:0 0 10px 0;font-size:20px;color:#991b1b;">🚨 네이버 카페 자동 발행 차단 (999)</h1>
+        <p style="margin:0 0 10px 0;line-height:1.6;">
+          네이버 카페 글쓰기 API 가 모든 게시 시도에 대해 <code>code 999</code> 로 거부하고 있습니다.
+          토큰 문제가 아니라(인증은 통과) <b>계정/카페 차원의 글쓰기 제한</b>으로 추정됩니다.
+          반복 호출이 차단을 연장시킬 수 있어 자동 발행을 일시 보류 중입니다.
+        </p>
+        <h3 style="margin:14px 0 6px 0;font-size:15px;">✅ 확인 / 조치</h3>
+        <ol style="margin:0;padding-left:20px;line-height:1.7;">
+          <li>카페 글 올리는 <b>네이버 계정으로 로그인</b> → 해당 카페 게시판에 <b>수동으로 글 작성</b> 시도</li>
+          <li>"게시글 작성이 제한되었습니다" / 스팸·이용제한 안내가 뜨는지 확인</li>
+          <li>제한 시 → 이용제한 해제 신청 후 며칠 쿨다운 / 정상이면 게시판 권한(등업 조건) 점검</li>
+        </ol>
+        <h3 style="margin:14px 0 6px 0;font-size:15px;">📄 마지막 에러</h3>
+        <pre style="margin:0;padding:10px;background:#fff;border:1px solid #fecaca;border-radius:8px;white-space:pre-wrap;word-break:break-word;font-size:12px;">${escapeHtml(errorMessage)}</pre>
+        <p style="margin:14px 0 0 0;color:#6b7280;font-size:12px;">
+          6시간 cooldown. 차단이 풀려 발행이 1건이라도 성공하면 자동 재개됩니다.
+        </p>
+      </div>
+    </div>
+  `;
+
+  try {
+    await transporter.sendMail({
+      from: `"Nowcar Auto" <${emailUser}>`,
+      to: emailUser,
+      subject: "[나우카 자동화] 🚨 네이버 카페 발행 차단 (999) — 계정 확인 필요",
+      html,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "알 수 없는 오류";
+    throw new Error(`[mailer] 카페 차단 알림 발송 실패: ${message}`);
+  }
+}
+
 export async function sendToTistory(content: GeneratedContent): Promise<void> {
   if (!autoPublishTistory) {
     throw new Error(
