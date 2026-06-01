@@ -21,6 +21,10 @@ import {
   notifyBotBlockIfNeeded,
 } from "@/lib/youtube-bot-detect";
 import { ensureMetaTokenLoaded } from "@/lib/meta-token";
+import {
+  isPastLocalWorkerGrace,
+  LOCAL_WORKER_GRACE_MINUTES,
+} from "@/lib/download-grace";
 
 /**
  * ============================================================
@@ -89,6 +93,7 @@ type VideoRow = {
   storage_path: string | null;
   download_attempts: number | null;
   duration_seconds: number | null;
+  created_at: string | null;
 };
 
 type ContentRow = {
@@ -190,6 +195,19 @@ async function ensureVideoDownloaded(video: VideoRow): Promise<string | null> {
   if (attempts >= INLINE_DOWNLOAD_MAX_ATTEMPTS) {
     console.warn(
       `[publish-meta] ⏭ 인라인 다운로드 포기: video_id=${video.video_id}, attempts=${attempts}`,
+    );
+    return null;
+  }
+
+  // "로컬 워커 우선" 게이트: 감지 직후 GRACE(분) 내 영상은 Vercel ytdl 을
+  // 시도하지 않고 로컬 워커(가정용 IP, 10분 주기)에게 양보한다. 데이터센터 IP
+  // 에서 ytdl 을 때리면 봇차단에 걸려 쿠키 경고 메일이 발송되는데, 정상 운영
+  // 중에는 로컬 워커가 곧 받아주므로 이 인라인 시도는 메일만 유발하고 무의미하다.
+  // 다음 사이클에 storage_path 가 채워지면 그때 발행된다(IG/FB/Threads 는
+  // 이미 storage_path 없으면 skip). 자세한 배경은 lib/download-grace.ts 참고.
+  if (!isPastLocalWorkerGrace(video.created_at)) {
+    console.log(
+      `[publish-meta] ⏳ grace 내(${LOCAL_WORKER_GRACE_MINUTES}분) → 인라인 다운로드 보류, 로컬 워커 대기: video_id=${video.video_id}`,
     );
     return null;
   }
@@ -411,7 +429,7 @@ export async function runPublishMetaStep(): Promise<PublishMetaResult> {
   const { data: candidateVideos, error: videosError } = await supabase
     .from("youtube_videos")
     .select(
-      "id, video_id, title, video_url, storage_path, download_attempts, duration_seconds",
+      "id, video_id, title, video_url, storage_path, download_attempts, duration_seconds, created_at",
     )
     .eq("processed", true)
     .or(`duration_seconds.is.null,duration_seconds.lte.${maxShortSeconds}`)

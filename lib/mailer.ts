@@ -208,12 +208,19 @@ export async function sendCookieExpiredAlert(
   const html = `
     <div style="max-width:720px;margin:0 auto;padding:20px;color:#111827;font-family:'Malgun Gothic','Apple SD Gothic Neo',Arial,sans-serif;">
       <div style="border:2px solid #dc2626;border-radius:12px;padding:18px;background:#fef2f2;">
-        <h1 style="margin:0 0 10px 0;font-size:20px;color:#991b1b;">🚨 YouTube 쿠키 만료 감지</h1>
+        <h1 style="margin:0 0 10px 0;font-size:20px;color:#991b1b;">🚨 YouTube 다운로드 실패 (봇차단 감지)</h1>
         <p style="margin:0 0 10px 0;line-height:1.6;">
-          데이터센터 IP 봇 감지로 영상 다운로드가 실패했습니다. Vercel 환경변수
-          <b>YOUTUBE_COOKIES</b> 를 갱신해 주세요.
+          ytdl 경로가 봇 차단으로 실패했습니다. 아래 <b>1순위 권장</b>:
+          Drive 폴더에 원본 mp4 사본만 올려두면 쿠키 갱신 없이 다음 cron 에서
+          자동으로 처리됩니다.
         </p>
-        <h3 style="margin:14px 0 6px 0;font-size:15px;">📋 갱신 절차</h3>
+        <h3 style="margin:14px 0 6px 0;font-size:15px;">🗂️ 1순위 — Google Drive 사본 업로드 (권장)</h3>
+        <ol style="margin:0;padding-left:20px;line-height:1.7;">
+          <li>YouTube 업로드한 원본 mp4 파일을 <b>Nowcar-Auto-Source</b> Drive 폴더에 업로드</li>
+          <li>파일명을 <code>{videoId}.mp4</code> 로 변경 (예: <code>ZJjuGSE457A.mp4</code>)</li>
+          <li>끝 — 다음 cron(매일 19:00 KST)에서 자동 다운로드 후 Drive 파일 영구 삭제</li>
+        </ol>
+        <h3 style="margin:14px 0 6px 0;font-size:15px;">🍪 2순위 — YOUTUBE_COOKIES 갱신 (외주 영상이거나 Drive 못 쓸 때)</h3>
         <ol style="margin:0;padding-left:20px;line-height:1.7;">
           <li>Chrome 에서 youtube.com 로그인 (자동발행용 계정)</li>
           <li>Cookie-Editor 확장 → Export → JSON</li>
@@ -226,7 +233,7 @@ export async function sendCookieExpiredAlert(
         <pre style="margin:0;padding:10px;background:#fff;border:1px solid #fecaca;border-radius:8px;white-space:pre-wrap;word-break:break-word;font-size:12px;">${escapeHtml(sampleError)}</pre>
         <p style="margin:14px 0 0 0;color:#6b7280;font-size:12px;">
           이 메일은 봇차단 감지 후 6시간 cooldown 으로 발송됩니다.
-          쿠키 갱신만 하면 별도 SQL 리셋 없이 다음 cron 사이클에 자동 재시도됩니다.
+          어느 방식이든 별도 SQL 리셋 없이 다음 cron 사이클에 자동 재시도됩니다.
         </p>
       </div>
     </div>
@@ -236,7 +243,7 @@ export async function sendCookieExpiredAlert(
     await transporter.sendMail({
       from: `"Nowcar Auto" <${emailUser}>`,
       to: emailUser,
-      subject: "[나우카 자동화] 🚨 YOUTUBE_COOKIES 갱신 필요 (봇차단 감지)",
+      subject: "[나우카 자동화] 🚨 YouTube 다운로드 실패 (Drive 사본 업로드 권장)",
       html,
     });
   } catch (error) {

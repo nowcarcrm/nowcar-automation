@@ -74,12 +74,13 @@ function createDefaultChannelResult(): Record<ChannelType, ChannelResult> {
 }
 
 /**
- * Threads 는 [[project_threads_auto_marketer_tone]] 정책상 반말·4단 마케터
- * 톤이며 CTA(전화·홈페이지·유튜브) / 해시태그 / 이모지 박스 전부 면제.
- * 다른 채널은 운영자 톤 + CTA 필수.
+ * Threads/Instagram 은 시청자/팬·마케터 톤 채널이라 5종 정보 박스(전화·카톡·
+ * 홈페이지·유튜브·카페) 강제 검증을 면제한다. 광고문체 회피를 위해 본문에
+ * 한 줄짜리 가벼운 안내만 들어가도록 채널 프롬프트에서 명시.
+ * 카페·블로그·티스토리는 운영자 톤이라 5종 토큰 검증 유지(영업 끈 보장).
  */
 function isCtaExemptChannel(channelType: ChannelType): boolean {
-  return channelType === "threads";
+  return channelType === "threads" || channelType === "instagram";
 }
 
 function validateCta(

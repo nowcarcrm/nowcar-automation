@@ -6,6 +6,7 @@ import {
   notifyBotBlockIfNeeded,
 } from "@/lib/youtube-bot-detect";
 import { ensureMetaTokenLoaded } from "@/lib/meta-token";
+import { localWorkerGraceCutoffIso } from "@/lib/download-grace";
 
 /**
  * ============================================================
@@ -104,11 +105,18 @@ function verifyAuth(req: NextRequest): { ok: boolean; reason?: string } {
 async function fetchPendingVideos(): Promise<PendingVideo[]> {
   const supabase = createAdminClient();
 
+  // "로컬 워커 우선" 게이트: 감지 직후 GRACE(분) 동안은 Vercel ytdl 대상에서
+  // 제외해 가정용 IP 의 로컬 워커(C:\nowcar-worker\worker.js, 10분 주기)에게
+  // 먼저 양보한다. GRACE 를 넘기도록 storage_path 가 비어 있는 영상만 Vercel
+  // ytdl 폴백 대상이 된다(= 로컬 워커가 PC off/장애로 처리 못 한 경우).
+  // 데이터센터 IP ytdl 봇차단 → 쿠키 경고 메일이 정상 운영 중 발송되는 것을
+  // 원천 차단하기 위함. 자세한 배경은 lib/download-grace.ts 참고.
   const { data, error } = await supabase
     .from("youtube_videos")
     .select("id, video_id, title, download_attempts")
     .is("storage_path", null)
     .lt("download_attempts", MAX_ATTEMPTS)
+    .lt("created_at", localWorkerGraceCutoffIso())
     .order("created_at", { ascending: true })
     .limit(BATCH_SIZE);
 

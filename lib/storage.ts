@@ -1,5 +1,11 @@
 import ytdl from "@distube/ytdl-core";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import {
+  deleteDriveFile,
+  downloadDriveFile,
+  findVideoFile,
+  isGoogleDriveEnabled,
+} from "@/lib/gdrive";
 
 /* ------------------------------------------------------------
  * YouTube 봇 차단 우회용 cookie agent
@@ -281,8 +287,44 @@ export async function uploadVideoBuffer(
 export async function downloadAndUploadShort(
   videoId: string,
 ): Promise<UploadedVideo> {
-  console.log(`[storage] 🎬 유튜브 쇼츠 다운로드 시작: ${videoId}`);
-  const buffer = await downloadYouTubeVideo(videoId);
+  console.log(`[storage] 🎬 다운로드 시작: ${videoId}`);
+
+  // 1) Google Drive 원본 우선 — 운영자가 업로드해둔 파일이 있으면 거기서 가져옴.
+  //    YouTube 봇차단/쿠키 회전과 무관해 가장 안정적.
+  let buffer: Buffer | undefined;
+  let driveFileId: string | null = null;
+  let source: "gdrive" | "ytdl" = "ytdl";
+
+  if (isGoogleDriveEnabled()) {
+    try {
+      const driveFile = await findVideoFile(videoId);
+      if (driveFile) {
+        const sizeMb = driveFile.sizeBytes
+          ? `${(driveFile.sizeBytes / (1024 * 1024)).toFixed(2)} MB`
+          : "?";
+        console.log(
+          `[storage] 🗂️  Drive 원본 발견: ${driveFile.name} (${sizeMb})`,
+        );
+        buffer = await downloadDriveFile(driveFile.id);
+        driveFileId = driveFile.id;
+        source = "gdrive";
+      } else {
+        console.log(
+          `[storage] 🗂️  Drive 폴더에 ${videoId} 매칭 파일 없음 → ytdl 폴백`,
+        );
+      }
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      console.warn(
+        `[storage] ⚠️ Drive 경로 실패, ytdl 폴백: ${msg}`,
+      );
+    }
+  }
+
+  // 2) Drive 미발견/실패 → ytdl 폴백 (외주 영상 등 Drive 에 사본 없는 경우)
+  if (!buffer) {
+    buffer = await downloadYouTubeVideo(videoId);
+  }
 
   // 0 바이트 파일은 Meta 업로드 시 반드시 실패하므로 사전 차단
   if (buffer.byteLength === 0) {
@@ -290,11 +332,25 @@ export async function downloadAndUploadShort(
   }
 
   const sizeMb = (buffer.byteLength / (1024 * 1024)).toFixed(2);
-  console.log(`[storage] ✅ 다운로드 완료: ${sizeMb} MB`);
+  console.log(`[storage] ✅ 다운로드 완료(${source}): ${sizeMb} MB`);
 
   const uploaded = await uploadVideoBuffer(videoId, buffer);
   console.log(`[storage] ☁️  Supabase 업로드 완료: ${uploaded.path}`);
   console.log(`[storage] 🌐 공개 URL: ${uploaded.publicUrl}`);
+
+  // 3) Drive 에서 가져왔으면 업로드 성공 후 영구 삭제 (멱등 호출 안전).
+  //    삭제 실패해도 본 작업은 성공으로 본다 — 다음 cron 에서 재시도되며
+  //    같은 videoId 는 storage_path 가 채워져 다시 처리 대상이 아니다.
+  if (driveFileId) {
+    try {
+      await deleteDriveFile(driveFileId);
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      console.warn(
+        `[storage] ⚠️ Drive 정리 실패(처리는 정상 종료): ${msg}`,
+      );
+    }
+  }
 
   return uploaded;
 }
