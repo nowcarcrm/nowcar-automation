@@ -350,10 +350,20 @@ export async function GET(request: NextRequest) {
     step4.status, // 변수명 step4 는 실제 이메일 단계
   ];
   const failedStepCount = stepStatuses.filter((s) => s === "error").length;
-  // Bug fix: 이전엔 `failedStepCount < 5` 라 5개 모두 error 일 때만 success=false 였음.
-  // 부분 실패도 success=true 로 보고되어 모니터링 시 fail 을 놓치는 문제.
-  // 한 개라도 error 면 success=false 로 엄격화.
+  // body.success 는 엄격하게: 한 개라도 error 면 false (이메일/모니터링 신뢰도용).
   const success = failedStepCount === 0;
+
+  // HTTP status 는 body.success 와 분리한다.
+  //   배경(2026-06-01): 외부 uptime 크론(cron-job.org)이 /api/pipeline/run 을
+  //   주기 호출하는데, 부분 실패(예: 네이버 카페 999 일시 차단, Meta 일시 오류)
+  //   하나만 나도 500 을 받으면 "엔드포인트 다운" 으로 간주 → 연속 실패 누적 시
+  //   크론 자체를 자동 비활성화해버려 발행이 통째로 멈춘다(실제 27회 실패로 disable됨).
+  //   → 파이프라인이 끝까지 돌았다면(각 단계 try-catch 로 보호됨) 200 을 반환해
+  //     크론을 살려둔다. 모든 단계가 error 인 "진짜 마비" 일 때만 500 으로 알린다.
+  //   부분 실패 추적은 body.success / errors[] / 이메일 리포트로 한다.
+  const allStepsFailed =
+    failedStepCount > 0 && failedStepCount === stepStatuses.length;
+  const httpStatus = allStepsFailed ? 500 : 200;
 
   const summary = success
     ? `✅ 신규 영상 ${step1.new_videos_count}개 → 콘텐츠 ${step2.total_contents_generated}개 생성 → 인스타 ${step3.instagram_published_count}건/페북 ${step3.facebook_published_count}건 발행 → 카페 ${step5.naver_cafe_published_count}건 발행 → 이메일 ${step4.emails_sent_count}통 발송`
@@ -379,5 +389,5 @@ export async function GET(request: NextRequest) {
   console.log(`✅ 전체 완료 (총 소요: ${elapsedSeconds}s)`);
   console.log("✅ ━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
-  return NextResponse.json(responseBody, { status: success ? 200 : 500 });
+  return NextResponse.json(responseBody, { status: httpStatus });
 }
