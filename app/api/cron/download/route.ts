@@ -1,5 +1,9 @@
 import { after, NextRequest, NextResponse } from "next/server";
-import { createAdminClient, downloadAndUploadShort } from "@/lib/storage";
+import {
+  createAdminClient,
+  downloadAndUploadShort,
+  isNoVercelSourceError,
+} from "@/lib/storage";
 import { runDetectStep } from "@/lib/pipeline/detect";
 import {
   isBotBlockError,
@@ -373,7 +377,12 @@ async function handleDownload(req: NextRequest): Promise<NextResponse> {
     const label = `${video.video_id}${video.title ? ` (${video.title.slice(0, 30)})` : ""}`;
     try {
       console.log(`[cron/download] ▶ 시작: ${label}`);
-      const uploaded = await downloadAndUploadShort(video.video_id);
+      // Vercel 은 Drive 원본만 사용하고 ytdl 은 시도하지 않는다(allowYtdlFallback=false).
+      // → 데이터센터 IP 봇차단/쿠키 경고메일을 원천 차단. ytdl 다운로드는 사무실 PC
+      //   로컬 워커(C:\nowcar-worker)가 전담한다.
+      const uploaded = await downloadAndUploadShort(video.video_id, {
+        allowYtdlFallback: false,
+      });
       await markDownloaded(video.id, uploaded.path);
       successes.push({
         video_id: video.video_id,
@@ -381,6 +390,13 @@ async function handleDownload(req: NextRequest): Promise<NextResponse> {
       });
       console.log(`[cron/download] ✅ 완료: ${label} → ${uploaded.path}`);
     } catch (error) {
+      // Drive 원본도 없는 경우 = 로컬 워커가 받을 때까지 대기. 실패/메일 아님.
+      if (isNoVercelSourceError(error)) {
+        console.log(
+          `[cron/download] ⏳ Drive 원본 없음 → 로컬 워커 대기(스킵): ${label}`,
+        );
+        continue;
+      }
       const msg = toErrorMessage(error);
       failures.push({ video_id: video.video_id, reason: msg });
       errors.push(`[${video.video_id}] ${msg}`);
