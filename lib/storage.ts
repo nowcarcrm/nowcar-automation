@@ -284,9 +284,34 @@ export async function uploadVideoBuffer(
  *
  * 파이프라인에서 호출하는 가장 상위 API.
  */
+/**
+ * Vercel(데이터센터 IP)에서 ytdl 폴백이 비활성화돼 있고 Drive 원본도 없을 때
+ * 던지는 신호 에러. "실패"가 아니라 "여기선 받을 소스가 없으니 로컬 워커를
+ * 기다린다"는 의미 — 호출자는 봇차단 메일/attempts 증가 없이 조용히 스킵한다.
+ */
+export class NoVercelSourceError extends Error {
+  constructor(videoId: string) {
+    super(
+      `[storage] ${videoId}: Drive 원본 없음 + Vercel ytdl 비활성 → 로컬 워커 대기`,
+    );
+    this.name = "NoVercelSourceError";
+  }
+}
+
+export function isNoVercelSourceError(error: unknown): boolean {
+  return error instanceof NoVercelSourceError;
+}
+
+/**
+ * @param opts.allowYtdlFallback Drive 미발견 시 ytdl 로 폴백할지. Vercel 경로는
+ *   false 로 호출 → 데이터센터 IP 봇차단/쿠키 경고메일을 원천 차단하고 다운로드는
+ *   사무실 PC 로컬 워커(가정/사무실 IP)에게만 맡긴다. 기본 true(로컬/기타 호출 호환).
+ */
 export async function downloadAndUploadShort(
   videoId: string,
+  opts: { allowYtdlFallback?: boolean } = {},
 ): Promise<UploadedVideo> {
+  const allowYtdlFallback = opts.allowYtdlFallback ?? true;
   console.log(`[storage] 🎬 다운로드 시작: ${videoId}`);
 
   // 1) Google Drive 원본 우선 — 운영자가 업로드해둔 파일이 있으면 거기서 가져옴.
@@ -322,7 +347,13 @@ export async function downloadAndUploadShort(
   }
 
   // 2) Drive 미발견/실패 → ytdl 폴백 (외주 영상 등 Drive 에 사본 없는 경우)
+  //    단 Vercel 경로(allowYtdlFallback=false)는 ytdl 을 시도하지 않는다.
+  //    데이터센터 IP ytdl 은 거의 봇차단되고 그때마다 쿠키 경고메일이 발송되므로,
+  //    다운로드는 로컬 워커에게만 맡기고 여기선 조용히 신호 에러로 빠진다.
   if (!buffer) {
+    if (!allowYtdlFallback) {
+      throw new NoVercelSourceError(videoId);
+    }
     buffer = await downloadYouTubeVideo(videoId);
   }
 

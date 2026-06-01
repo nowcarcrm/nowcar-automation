@@ -1,6 +1,7 @@
 import {
   createAdminClient,
   downloadAndUploadShort,
+  isNoVercelSourceError,
   TEMP_VIDEOS_BUCKET,
 } from "@/lib/storage";
 import {
@@ -218,7 +219,11 @@ async function ensureVideoDownloaded(video: VideoRow): Promise<string | null> {
 
   const supabase = createAdminClient();
   try {
-    const uploaded = await downloadAndUploadShort(video.video_id);
+    // Vercel 은 Drive 원본만 사용하고 ytdl 은 시도하지 않는다 → 봇차단/쿠키 경고메일
+    // 원천 차단. ytdl 다운로드는 사무실 PC 로컬 워커가 전담.
+    const uploaded = await downloadAndUploadShort(video.video_id, {
+      allowYtdlFallback: false,
+    });
     const { error } = await supabase
       .from("youtube_videos")
       .update({
@@ -239,6 +244,13 @@ async function ensureVideoDownloaded(video: VideoRow): Promise<string | null> {
     );
     return uploaded.path;
   } catch (error) {
+    // Drive 원본도 없는 경우 = 로컬 워커가 받을 때까지 대기. 실패/메일/ attempts 증가 아님.
+    if (isNoVercelSourceError(error)) {
+      console.log(
+        `[publish-meta] ⏳ Drive 원본 없음 → 로컬 워커 대기(스킵): video_id=${video.video_id}`,
+      );
+      return null;
+    }
     const msg = error instanceof Error ? error.message : String(error);
     console.error(`[publish-meta] ❌ 인라인 다운로드 실패: ${msg}`);
 
