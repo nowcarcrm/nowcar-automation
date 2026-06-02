@@ -575,7 +575,7 @@ export async function runPublishMetaStep(): Promise<PublishMetaResult> {
     video.storage_path = resolvedStoragePath;
 
     // 4) 이 영상에 속한 generated_contents 조회
-    //    → instagram 캡션/해시태그, naver_blog 본문을 가져온다.
+    //    → instagram 캡션/해시태그, threads 본문을 가져온다(naver_blog 폴백 제거됨).
     //    status 가 'failed' 또는 'cta_incomplete' 인 행은 발행 부적합이므로 제외.
     //    (cta_incomplete 는 CTA 키워드가 빠진 미완성 콘텐츠 — 발행되면 운영자
     //     톤/안내 정보가 누락된 채 SNS 에 올라가므로 차단)

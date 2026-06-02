@@ -52,10 +52,46 @@ export type EnsureStatus =
   | "bootstrapped_from_env"
   | "refresh_failed_fallback_env";
 
+/** refresh 실패 원인 분류(M-7): 운영자 트리아지용. */
+export type MetaErrorKind = "expired" | "invalid_creds" | "transient" | "other";
+
 export interface EnsureResult {
   status: EnsureStatus;
   expiresAt: string | null;
   note?: string;
+  /** refresh 실패 시 원인 분류(M-7). */
+  errorKind?: MetaErrorKind;
+  /** 현재 활성 토큰이 만료된 것으로 추정되는지(H-6/M-8). true 면 발행 시 코드190 위험. */
+  tokenExpired?: boolean;
+}
+
+/** Meta 에러 메시지를 원인별로 분류(M-7). */
+function classifyMetaError(message: string): MetaErrorKind {
+  const m = message.toLowerCase();
+  if (
+    m.includes("expired") ||
+    m.includes("session has expired") ||
+    m.includes('"code":190') ||
+    m.includes("invalid_grant")
+  ) {
+    return "expired";
+  }
+  if (
+    m.includes("invalid") &&
+    (m.includes("client") || m.includes("secret") || m.includes("app"))
+  ) {
+    return "invalid_creds";
+  }
+  if (
+    m.includes("timeout") ||
+    m.includes("etimedout") ||
+    m.includes("econnreset") ||
+    /http 5\d\d/.test(m) ||
+    m.includes("network")
+  ) {
+    return "transient";
+  }
+  return "other";
 }
 
 function getMetaAppCreds(): { appId: string; appSecret: string } | null {
@@ -296,8 +332,22 @@ export async function ensureMetaTokenLoaded(): Promise<EnsureResult> {
       return { status: "refreshed_from_db", expiresAt: newExpiresAt };
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
-      console.warn(`[meta-token] DB 토큰 refresh 실패: ${msg}`);
-      await notifyRefreshFailureIfNeeded(msg);
+      const kind = classifyMetaError(msg);
+      // H-6/M-8: DB 토큰이 이미 만료됐는데 refresh 까지 실패하면 stale env 토큰으로
+      // 발행되어 Meta 코드190 이 난다. 만료 여부를 명확히 잡아 error 레벨로 노출.
+      const tokenExpired = !(Number.isFinite(expiresAtMs) && expiresAtMs > nowMs);
+      if (tokenExpired) {
+        console.error(
+          `[meta-token] ❌ DB 토큰 만료 + refresh 실패(kind=${kind}) — 만료 토큰으로 발행 위험: ${msg}`,
+        );
+      } else {
+        console.warn(
+          `[meta-token] DB 토큰 refresh 실패(아직 유효, kind=${kind}): ${msg}`,
+        );
+      }
+      await notifyRefreshFailureIfNeeded(
+        `[${kind}]${tokenExpired ? "[EXPIRED]" : ""} DB refresh 실패: ${msg}`,
+      );
       // 만료까지 시간 남아있으면 DB 토큰으로 계속 진행
       if (Number.isFinite(expiresAtMs) && expiresAtMs > nowMs) {
         process.env.META_ACCESS_TOKEN = row.value;
@@ -306,6 +356,8 @@ export async function ensureMetaTokenLoaded(): Promise<EnsureResult> {
         status: "refresh_failed_fallback_env",
         expiresAt: row.expires_at,
         note: msg,
+        errorKind: kind,
+        tokenExpired,
       };
     }
   }
@@ -325,12 +377,18 @@ export async function ensureMetaTokenLoaded(): Promise<EnsureResult> {
     return { status: "bootstrapped_from_env", expiresAt: newExpiresAt };
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
-    console.warn(`[meta-token] 초기 exchange 실패: ${msg}`);
-    await notifyRefreshFailureIfNeeded(msg);
+    const kind = classifyMetaError(msg);
+    // 초기 부트스트랩 실패: env 토큰을 long-lived 로 교환 못 함. invalid_creds 면
+    // META_APP_ID/SECRET 점검, expired 면 env 토큰 자체가 만료된 것.
+    console.error(`[meta-token] ❌ 초기 exchange 실패(kind=${kind}): ${msg}`);
+    await notifyRefreshFailureIfNeeded(`[${kind}] 초기 exchange 실패: ${msg}`);
     return {
       status: "refresh_failed_fallback_env",
       expiresAt: null,
       note: msg,
+      errorKind: kind,
+      // env 토큰의 만료 여부는 알 수 없어 미상으로 둔다(debug_token 은 type 만 확인).
+      tokenExpired: kind === "expired" ? true : undefined,
     };
   }
 }

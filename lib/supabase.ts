@@ -140,9 +140,12 @@ export async function saveGeneratedContents(
     email_sent: false,
   }));
 
+  // M-4: insert → upsert. (video_id, channel_type) 유니크 인덱스와 함께 멱등성 보장.
+  // 같은 영상이 재처리(재시도/cron 재트리거)돼도 채널별 행이 중복 누적되지 않고
+  // 기존 행을 갱신한다 → 중복 Tistory 이메일/비용 방지.
   const { data, error } = await supabase
     .from("generated_contents")
-    .insert(normalizedContents)
+    .upsert(normalizedContents, { onConflict: "video_id,channel_type" })
     .select("*");
 
   if (error) {

@@ -56,10 +56,12 @@ function toErrorMessage(error: unknown): string {
 }
 
 function getPendingTtlMinutes(): number {
+  // M-9: publish-meta 와 기본값 통일(이전 10분 → 20분). 동일 env 미설정 시 플랫폼별
+  // cleanup 타이밍이 달라 H-3/H-4 레이스 윈도가 달라지던 불일치 제거.
   const raw = process.env.PUBLISH_PENDING_TTL_MINUTES;
-  if (!raw) return 10;
+  if (!raw) return 20;
   const parsed = Number(raw);
-  if (!Number.isFinite(parsed) || parsed <= 0) return 10;
+  if (!Number.isFinite(parsed) || parsed <= 0) return 20;
   return Math.floor(parsed);
 }
 
