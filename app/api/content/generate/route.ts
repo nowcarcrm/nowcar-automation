@@ -1,4 +1,5 @@
-import { NextResponse } from "next/server";
+import { NextResponse, type NextRequest } from "next/server";
+import { isPipelineRequestAuthorized } from "@/lib/cron-auth";
 import {
   generateContentWithUsage,
   type GeneratedDraftWithUsage,
@@ -130,7 +131,15 @@ async function generateWithCtaRetry(
   return last as GeneratedDraftWithUsage;
 }
 
-export async function GET() {
+export async function GET(request?: NextRequest) {
+  // C-2: HTTP 직접 호출은 CRON_SECRET 요구(무제한 Claude/Whisper 비용 방지).
+  // 내부 파이프라인 호출(runContentGenerate(), request 미전달)은 면제.
+  if (!isPipelineRequestAuthorized(request)) {
+    return NextResponse.json(
+      { success: false, error: "Unauthorized" },
+      { status: 401 },
+    );
+  }
   const errors: string[] = [];
   const results: VideoProcessResult[] = [];
   let totalGeneratedCount = 0;

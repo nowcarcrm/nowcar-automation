@@ -1,4 +1,5 @@
-import { NextResponse } from "next/server";
+import { NextResponse, type NextRequest } from "next/server";
+import { isPipelineRequestAuthorized } from "@/lib/cron-auth";
 import Anthropic from "@anthropic-ai/sdk";
 import nodemailer from "nodemailer";
 import { supabase } from "@/lib/supabase";
@@ -23,7 +24,8 @@ interface EnvVarDetails {
 interface EnvResult {
   status: ServiceStatus;
   message: string;
-  details: EnvVarDetails;
+  // M-5: 인증된 호출에만 노출. 무인증 호출엔 어떤 env 가 설정/누락인지 열거하지 않음.
+  details?: EnvVarDetails;
 }
 
 interface ServiceResult {
@@ -57,7 +59,9 @@ function toErrorMessage(error: unknown): string {
 
 const CLAUDE_MODEL = "claude-sonnet-4-6";
 
-export async function GET() {
+export async function GET(request?: NextRequest) {
+  // M-5: env 변수 설정/누락 상세는 인증된 호출에만 노출(공격표면 열거 방지).
+  const authorized = isPipelineRequestAuthorized(request);
   const envDetails: EnvVarDetails = {
     YOUTUBE_API_KEY: getEnvStatus("YOUTUBE_API_KEY"),
     YOUTUBE_CHANNEL_ID: getEnvStatus("YOUTUBE_CHANNEL_ID"),
@@ -77,12 +81,12 @@ export async function GET() {
       ? {
           status: "ok",
           message: "환경변수 확인 완료: 필수 7개 항목이 모두 설정되어 있습니다.",
-          details: envDetails,
+          details: authorized ? envDetails : undefined,
         }
       : {
           status: "error",
           message: `환경변수 확인 결과: ${missingCount}개 항목이 비어 있습니다. .env.local 값을 확인해주세요.`,
-          details: envDetails,
+          details: authorized ? envDetails : undefined,
         };
 
   const supabaseResult: ServiceResult = {
