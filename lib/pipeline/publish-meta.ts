@@ -569,6 +569,7 @@ export async function runPublishMetaStep(): Promise<PublishMetaResult> {
       // 다운로드 자체가 실패/한도 초과면 이번 사이클은 스킵하고 다음에 재시도
       if (needIg) result.instagram_skipped_count += 1;
       if (needFb) result.facebook_skipped_count += 1;
+      if (needTh) result.threads_skipped_count += 1; // M-1: Threads 스킵 집계 누락 보정
       continue;
     }
     video.storage_path = resolvedStoragePath;
@@ -702,8 +703,11 @@ export async function runPublishMetaStep(): Promise<PublishMetaResult> {
                   )
                 : null,
             });
-          } catch {
-            // pending 상태 업데이트 실패는 기존 에러 로그로 추적
+          } catch (pendingErr) {
+            // H-2: pending→final 갱신 실패를 조용히 삼키지 않고 노출한다.
+            console.error(
+              `[publish-meta] ⚠️ pending 상태 업데이트 실패(무시됨): ${toErrorMessage(pendingErr)}`,
+            );
           }
           console.error(`[publish-meta] ❌ 인스타 처리 중 예외: ${msg}`);
           result.errors.push(`[instagram][${video.video_id}] ${msg}`);
@@ -720,7 +724,10 @@ export async function runPublishMetaStep(): Promise<PublishMetaResult> {
     //    → 캡션은 instagram 본문만 사용(FB 릴스도 IG 와 동일한 시청자/팬 톤).
     //    → storage_path 가 없으면 로컬 워커 완료까지 스킵
     // ────────────────────────────────────
-    if (needFb) {
+    // C-3 픽스: 라벨을 달아 FB 내부 가드가 `continue`(=루프 다음 영상으로) 대신
+    // `break fbBlock`(=FB 블록만 탈출)하게 한다. FB 스킵/실패가 같은 영상의 Threads
+    // 발행(아래 (C) 블록)을 통째로 건너뛰던 데이터 손실 버그를 막는다.
+    fbBlock: if (needFb) {
       const storagePathFromDb = video.storage_path;
       if (!storagePathFromDb) {
         console.warn(
@@ -741,7 +748,7 @@ export async function runPublishMetaStep(): Promise<PublishMetaResult> {
           console.warn(`[publish-meta] ⚠️  ${msg}`);
           result.errors.push(msg);
           result.facebook_skipped_count += 1;
-          continue;
+          break fbBlock;
         }
 
         const { data: publicUrlData } = supabase.storage
@@ -753,7 +760,7 @@ export async function runPublishMetaStep(): Promise<PublishMetaResult> {
           console.error(`[publish-meta] ❌ ${msg}`);
           result.errors.push(msg);
           result.facebook_failed_count += 1;
-          continue;
+          break fbBlock;
         }
 
         try {
@@ -816,8 +823,11 @@ export async function runPublishMetaStep(): Promise<PublishMetaResult> {
               errorMessage: msg,
               captionPreview: caption.slice(0, 200),
             });
-          } catch {
-            // pending 상태 업데이트 실패는 기존 에러 로그로 추적
+          } catch (pendingErr) {
+            // H-2: pending→final 갱신 실패를 조용히 삼키지 않고 노출한다.
+            console.error(
+              `[publish-meta] ⚠️ pending 상태 업데이트 실패(무시됨): ${toErrorMessage(pendingErr)}`,
+            );
           }
           console.error(`[publish-meta] ❌ 페북 처리 중 예외: ${msg}`);
           result.errors.push(`[facebook][${video.video_id}] ${msg}`);
@@ -924,8 +934,11 @@ export async function runPublishMetaStep(): Promise<PublishMetaResult> {
                   errorMessage: msg,
                   captionPreview: caption.slice(0, 200),
                 });
-              } catch {
-                // pending 상태 업데이트 실패는 기존 에러 로그로 추적
+              } catch (pendingErr) {
+                // H-2: pending→final 갱신 실패를 조용히 삼키지 않고 노출한다.
+                console.error(
+                  `[publish-meta] ⚠️ pending 상태 업데이트 실패(무시됨): ${toErrorMessage(pendingErr)}`,
+                );
               }
               console.error(`[publish-meta] ❌ 스레드 처리 중 예외: ${msg}`);
               result.errors.push(`[threads][${video.video_id}] ${msg}`);

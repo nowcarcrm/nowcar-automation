@@ -177,7 +177,7 @@ async function updateNaverCafePendingToFinal(params: {
   captionPreview: string | null;
 }): Promise<void> {
   const supabase = createAdminClient();
-  const { error } = await supabase
+  const { data, error } = await supabase
     .from("social_publishes")
     .update({
       status: params.status,
@@ -189,10 +189,18 @@ async function updateNaverCafePendingToFinal(params: {
     .eq("video_id", params.videoId)
     .eq("platform", "naver_cafe")
     .eq("status", "pending")
-    .is("deleted_at", null);
+    .is("deleted_at", null)
+    .select("id");
 
   if (error) {
     throw new Error(`pending -> ${params.status} 상태 업데이트 실패: ${error.message}`);
+  }
+  // H-4: 0행 매칭(pending 이 cleanup/TTL 정리로 사라졌거나 동시성 레이스) 시 경고.
+  // 발행 결과가 DB 에 반영 안 됐을 수 있어 모니터링에 노출한다(이전엔 조용히 통과).
+  if (!data || data.length === 0) {
+    console.warn(
+      `[publish-naver-cafe] ⚠️ pending→${params.status} 0행 매칭(video_id=${params.videoId}). cleanup/레이스로 발행 결과 미반영 가능성.`,
+    );
   }
 }
 

@@ -54,6 +54,9 @@ interface PublishMetaStepResult {
   facebook_published_count: number;
   facebook_failed_count: number;
   facebook_skipped_count: number;
+  threads_published_count: number;
+  threads_failed_count: number;
+  threads_skipped_count: number;
   duration_seconds: number;
 }
 
@@ -112,6 +115,9 @@ export async function GET(request: NextRequest) {
     facebook_published_count: 0,
     facebook_failed_count: 0,
     facebook_skipped_count: 0,
+    threads_published_count: 0,
+    threads_failed_count: 0,
+    threads_skipped_count: 0,
     duration_seconds: 0,
   };
   const step4: EmailStepResult = {
@@ -198,14 +204,23 @@ export async function GET(request: NextRequest) {
     step3.facebook_published_count = data.facebook_published_count;
     step3.facebook_failed_count = data.facebook_failed_count;
     step3.facebook_skipped_count = data.facebook_skipped_count;
+    step3.threads_published_count = data.threads_published_count;
+    step3.threads_failed_count = data.threads_failed_count;
+    step3.threads_skipped_count = data.threads_skipped_count;
 
+    // H-1: Threads 를 상태계산에 포함. 이전엔 IG/FB 만 합산해 Threads-only 장애가
+    // totalTried=0 → status='skipped' 로 은폐됐다.
     const totalTried =
       data.instagram_published_count +
       data.instagram_failed_count +
       data.facebook_published_count +
-      data.facebook_failed_count;
+      data.facebook_failed_count +
+      data.threads_published_count +
+      data.threads_failed_count;
     const totalSucceeded =
-      data.instagram_published_count + data.facebook_published_count;
+      data.instagram_published_count +
+      data.facebook_published_count +
+      data.threads_published_count;
 
     if (totalTried === 0) {
       step3.status = "skipped";
@@ -221,7 +236,7 @@ export async function GET(request: NextRequest) {
 
     step3.duration_seconds = Math.round((Date.now() - step3StartedAt) / 1000);
     console.log(
-      `[3/4] ✅ 발행 요약 - 인스타 ${step3.instagram_published_count}/${step3.instagram_published_count + step3.instagram_failed_count}, 페북 ${step3.facebook_published_count}/${step3.facebook_published_count + step3.facebook_failed_count} (소요: ${step3.duration_seconds}s)`,
+      `[3/4] ✅ 발행 요약 - 인스타 ${step3.instagram_published_count}/${step3.instagram_published_count + step3.instagram_failed_count}, 페북 ${step3.facebook_published_count}/${step3.facebook_published_count + step3.facebook_failed_count}, 스레드 ${step3.threads_published_count}/${step3.threads_published_count + step3.threads_failed_count} (소요: ${step3.duration_seconds}s)`,
     );
   } catch (error) {
     step3.status = "error";
@@ -366,7 +381,7 @@ export async function GET(request: NextRequest) {
   const httpStatus = allStepsFailed ? 500 : 200;
 
   const summary = success
-    ? `✅ 신규 영상 ${step1.new_videos_count}개 → 콘텐츠 ${step2.total_contents_generated}개 생성 → 인스타 ${step3.instagram_published_count}건/페북 ${step3.facebook_published_count}건 발행 → 카페 ${step5.naver_cafe_published_count}건 발행 → 이메일 ${step4.emails_sent_count}통 발송`
+    ? `✅ 신규 영상 ${step1.new_videos_count}개 → 콘텐츠 ${step2.total_contents_generated}개 생성 → 인스타 ${step3.instagram_published_count}건/페북 ${step3.facebook_published_count}건/스레드 ${step3.threads_published_count}건 발행 → 카페 ${step5.naver_cafe_published_count}건 발행 → 이메일 ${step4.emails_sent_count}통 발송`
     : "❌ 모든 단계가 실패했습니다. 로그와 errors를 확인해주세요.";
 
   const responseBody: PipelineResponse = {
