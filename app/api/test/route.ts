@@ -33,6 +33,7 @@ interface ServiceResult {
 
 interface TestResponse {
   timestamp: string;
+  commit: string;
   overall_status: OverallStatus;
   results: {
     env_vars: EnvResult;
@@ -207,6 +208,8 @@ export async function GET() {
 
   const responseBody: TestResponse = {
     timestamp: new Date().toISOString(),
+    // Vercel 이 배포 시 주입하는 실행 커밋 SHA. 배포 완료 감지/롤백 확인용.
+    commit: process.env.VERCEL_GIT_COMMIT_SHA ?? "unknown",
     overall_status: overallStatus,
     results: {
       env_vars: envResult,
