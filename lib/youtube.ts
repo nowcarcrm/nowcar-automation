@@ -54,7 +54,32 @@ function buildVideoUrl(videoId: string): string {
   return `https://www.youtube.com/watch?v=${videoId}`;
 }
 
+/**
+ * 최신 업로드 조회 진입점. playlistItems(1유닛)를 우선 사용하고, 실패 시에만
+ * search.list(100유닛)로 폴백한다.
+ *
+ * 2026-06-02 실측(각 10회): search 는 'Search Queries per day' 쿼터로 8/10 실패한
+ * 반면 playlist 는 9/10 성공 + 검색과 동일한 최신 영상 반환(parity 확인) + 평균
+ * 197ms로 search(712ms)보다 3.6배 빠름. detect 가 하루에도 여러 번 도는데 search
+ * 100유닛은 일일 쿼터를 빠르게 소진시켜 감지가 멈추던 근본 원인이었다.
+ */
 export async function getLatestVideos(maxResults = 10): Promise<LatestVideoItem[]> {
+  try {
+    return await getLatestVideosViaPlaylist(maxResults);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn(`[youtube] playlist 조회 실패 → search 폴백: ${message}`);
+    return await getLatestVideosViaSearch(maxResults);
+  }
+}
+
+/**
+ * (폴백 전용) search.list 기반 최신 영상 조회. 호출당 100유닛이라 비싸므로
+ * playlist 경로가 실패할 때만 사용한다.
+ */
+export async function getLatestVideosViaSearch(
+  maxResults = 10,
+): Promise<LatestVideoItem[]> {
   try {
     const response = await youtube.search.list({
       part: ["snippet"],
