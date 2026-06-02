@@ -131,6 +131,30 @@ async function generateWithCtaRetry(
   return last as GeneratedDraftWithUsage;
 }
 
+/**
+ * M-6: IG/스레드 시청자·마케터 톤 정책의 코드 백스톱(비차단).
+ * 프롬프트에만 의존하던 톤 강제를, 생성 후 금지 표현(공식 운영자/광고 문체)
+ * 탐지로 보강한다. 위반 시 발행을 막지는 않고(status=pending 유지) errors+warn 으로
+ * 노출해 운영자 스팟체크를 유도한다. (블로그/티스토리/카페는 운영자 톤이라 제외.)
+ */
+const VIEWER_TONE_BANNED = [
+  "안녕하세요",
+  "저희 나우카",
+  "저희 브랜드",
+  "고객님",
+  "전문 상담사",
+  "운영자가 안내",
+  "많은 관심 부탁",
+  "지금 바로 연락",
+  "문의 주세요",
+  "문의주세요",
+] as const;
+
+function detectToneDrift(channelType: ChannelType, body: string): string[] {
+  if (channelType !== "instagram" && channelType !== "threads") return [];
+  return VIEWER_TONE_BANNED.filter((p) => body.includes(p));
+}
+
 export async function GET(request?: NextRequest) {
   // C-2: HTTP 직접 호출은 CRON_SECRET 요구(무제한 Claude/Whisper 비용 방지).
   // 내부 파이프라인 호출(runContentGenerate(), request 미전달)은 면제.
@@ -273,6 +297,14 @@ export async function GET(request?: NextRequest) {
             const warnMessage = `[${channelType}] CTA 누락: ${validation.missing.join(", ")}`;
             errors.push(warnMessage);
             console.warn(warnMessage);
+          }
+
+          // M-6: 톤 드리프트 비차단 점검(IG/스레드만).
+          const toneHits = detectToneDrift(channelType, generated.draft.body);
+          if (toneHits.length > 0) {
+            const toneMsg = `[${channelType}] 톤 위반 의심(시청자/마케터 톤): ${toneHits.join(", ")}`;
+            errors.push(toneMsg);
+            console.warn(`[content/generate] ⚠️ ${toneMsg}`);
           }
 
           console.log(
