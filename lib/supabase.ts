@@ -55,10 +55,23 @@ function requireEnv(name: string): string {
 }
 
 const supabaseUrl = requireEnv("NEXT_PUBLIC_SUPABASE_URL");
-const supabaseAnonKey = requireEnv("NEXT_PUBLIC_SUPABASE_ANON_KEY");
 
-// 서버/스크립트 환경에서 재사용할 Supabase 클라이언트
-export const supabase = createClient(supabaseUrl, supabaseAnonKey);
+// 서버 전용 공유 Supabase 클라이언트.
+// 이 모듈의 모든 헬퍼는 서버 라우트/크론에서만 호출된다(브라우저/클라이언트 컴포넌트 사용 0건).
+// youtube_videos / generated_contents 에 RLS 를 적용해 public anon 키 접근을 차단하므로
+// (2026-06-02 RLS 하드닝), 공개 anon 키가 아니라 service_role 키로 접근해야 한다.
+// 빌드 시점에 service role 이 주입되지 않은 환경을 대비해 anon 으로 폴백하지만,
+// 런타임(Vercel 서버)에는 SUPABASE_SERVICE_ROLE_KEY 가 항상 존재하므로 service role 로 동작한다.
+const supabaseServerKey =
+  process.env.SUPABASE_SERVICE_ROLE_KEY ??
+  requireEnv("NEXT_PUBLIC_SUPABASE_ANON_KEY");
+
+export const supabase = createClient(supabaseUrl, supabaseServerKey, {
+  auth: {
+    persistSession: false,
+    autoRefreshToken: false,
+  },
+});
 
 export async function getUnprocessedVideos(): Promise<YouTubeVideo[]> {
   const { data, error } = await supabase
