@@ -107,6 +107,84 @@ export async function getLatestVideos(maxResults = 10): Promise<LatestVideoItem[
 }
 
 /**
+ * 채널 업로드 재생목록 ID. YouTube 규약상 채널 ID(UCxxxx)의 접두사 UC 를 UU 로
+ * 바꾸면 그 채널의 "업로드" 재생목록 ID 가 된다. 이 재생목록을 playlistItems.list
+ * (1 유닛)로 조회하면 search.list(100 유닛)와 동일하게 최신 업로드를 최신순으로
+ * 얻을 수 있어 쿼터 비용이 100배 저렴하다.
+ */
+function uploadsPlaylistId(): string | null {
+  if (channelId.startsWith("UC") && channelId.length > 2) {
+    return `UU${channelId.slice(2)}`;
+  }
+  return null;
+}
+
+/**
+ * search.list(100 유닛) 대신 playlistItems.list(1 유닛)로 최신 업로드를 조회한다.
+ * publishedAt 은 재생목록 추가 시각이 아닌 실제 영상 게시 시각
+ * (contentDetails.videoPublishedAt)을 사용해 recency 게이트와 정합성을 맞춘다.
+ */
+export async function getLatestVideosViaPlaylist(
+  maxResults = 10,
+): Promise<LatestVideoItem[]> {
+  const playlistId = uploadsPlaylistId();
+  if (!playlistId) {
+    throw new Error(
+      `[youtube] 업로드 재생목록 ID 도출 실패(channelId=${channelId}, UC 접두사 아님)`,
+    );
+  }
+
+  try {
+    const response = await youtube.playlistItems.list({
+      part: ["snippet", "contentDetails"],
+      playlistId,
+      maxResults,
+    });
+
+    const items = response.data.items ?? [];
+
+    const baseList = items
+      .map((item) => {
+        const videoId =
+          item.contentDetails?.videoId ?? item.snippet?.resourceId?.videoId;
+        const snippet = item.snippet;
+        if (!videoId || !snippet?.title) {
+          return null;
+        }
+        return {
+          videoId,
+          title: snippet.title,
+          description: snippet.description ?? "",
+          thumbnailUrl:
+            snippet.thumbnails?.medium?.url ??
+            snippet.thumbnails?.high?.url ??
+            snippet.thumbnails?.default?.url ??
+            null,
+          // 실제 게시 시각 우선(재생목록 추가 시각 fallback).
+          publishedAt:
+            item.contentDetails?.videoPublishedAt ??
+            snippet.publishedAt ??
+            null,
+          videoUrl: buildVideoUrl(videoId),
+          durationSeconds: null as number | null,
+        } satisfies LatestVideoItem;
+      })
+      .filter((item): item is LatestVideoItem => item !== null);
+
+    const durationMap = await fetchDurationsSeconds(
+      baseList.map((v) => v.videoId),
+    );
+    for (const v of baseList) {
+      v.durationSeconds = durationMap.get(v.videoId) ?? null;
+    }
+    return baseList;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "알 수 없는 오류";
+    throw new Error(`[youtube] 최신 영상 조회 실패(playlist): ${message}`);
+  }
+}
+
+/**
  * videos.list(part=contentDetails) 로 여러 영상의 duration(초) 을 일괄 조회한다.
  * 실패한 경우 해당 ID 는 Map 에서 제외(상위에서 null 처리).
  */
