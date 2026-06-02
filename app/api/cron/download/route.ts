@@ -11,6 +11,7 @@ import {
 } from "@/lib/youtube-bot-detect";
 import { ensureMetaTokenLoaded } from "@/lib/meta-token";
 import { localWorkerGraceCutoffIso } from "@/lib/download-grace";
+import { runPipelineHealthCheck } from "@/lib/pipeline-health";
 
 /**
  * ============================================================
@@ -292,6 +293,21 @@ async function handleDownload(req: NextRequest): Promise<NextResponse> {
     const msg = toErrorMessage(error);
     console.warn(
       `[cron/download] ⚠ Meta token prime 단계 실패(env 토큰 사용): ${msg}`,
+    );
+  }
+
+  // 1.45) 파이프라인 헬스 점검 — "조용한 고장"(멈춘 pending·미다운로드 백로그·
+  //       발행 실패 급증·토큰 만료 임박)을 감지해 12h cooldown 으로 다이제스트 알림.
+  //       cron 은 PC 와 무관하게 매일 돌므로 신뢰할 수 있는 감시 앵커. 배경:
+  //       lib/pipeline-health.ts. 내부에서 모든 예외를 흡수하므로 cron 을 깨지 않는다.
+  try {
+    const health = await runPipelineHealthCheck();
+    console.log(
+      `[cron/download] 🩺 헬스 점검: 이상 ${health.anomalies.length}건, 알림 sent=${health.alertSent} (${health.alertReason})`,
+    );
+  } catch (error) {
+    console.warn(
+      `[cron/download] ⚠ 헬스 점검 단계 실패(진행은 계속): ${toErrorMessage(error)}`,
     );
   }
 

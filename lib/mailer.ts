@@ -331,6 +331,63 @@ export async function sendNaverCafeBlockedAlert(
   }
 }
 
+export interface PipelineHealthAlertInput {
+  anomalies: Array<{ key: string; title: string; detail: string }>;
+  context: string[];
+}
+
+export async function sendPipelineHealthAlert(
+  input: PipelineHealthAlertInput,
+): Promise<void> {
+  const { anomalies, context } = input;
+  const anomalyHtml = anomalies
+    .map(
+      (a) => `
+        <li style="margin:0 0 10px 0;">
+          <b style="color:#991b1b;">${escapeHtml(a.title)}</b><br />
+          <span style="color:#374151;font-size:13px;">${escapeHtml(a.detail)}</span>
+        </li>`,
+    )
+    .join("");
+
+  const contextHtml = context.length
+    ? `<ul style="margin:8px 0;padding-left:20px;line-height:1.7;color:#374151;font-size:13px;">${context
+        .map((c) => `<li>${escapeHtml(c)}</li>`)
+        .join("")}</ul>`
+    : "<p style='margin:0;color:#6b7280;'>-</p>";
+
+  const html = `
+    <div style="max-width:720px;margin:0 auto;padding:20px;color:#111827;font-family:'Malgun Gothic','Apple SD Gothic Neo',Arial,sans-serif;">
+      <div style="border:2px solid #d97706;border-radius:12px;padding:18px;background:#fffbeb;">
+        <h1 style="margin:0 0 10px 0;font-size:20px;color:#92400e;">⚠️ 파이프라인 헬스 점검 — 이상 ${anomalies.length}건</h1>
+        <p style="margin:0 0 10px 0;line-height:1.6;">
+          매일 자동 점검에서 아래 항목이 "고장난 상태"로 감지됐습니다. 정상적인 한가함이
+          아니라 조치가 필요한 신호입니다.
+        </p>
+        <h3 style="margin:14px 0 6px 0;font-size:15px;">🚩 감지된 이상</h3>
+        <ul style="margin:0;padding-left:20px;">${anomalyHtml}</ul>
+        <h3 style="margin:14px 0 6px 0;font-size:15px;">ℹ️ 현재 상태(참고)</h3>
+        ${contextHtml}
+        <p style="margin:14px 0 0 0;color:#6b7280;font-size:12px;">
+          12시간 cooldown. 이상이 해소되면 자동으로 중단됩니다.
+        </p>
+      </div>
+    </div>
+  `;
+
+  try {
+    await transporter.sendMail({
+      from: `"Nowcar Auto" <${emailUser}>`,
+      to: emailUser,
+      subject: `[나우카 자동화] ⚠️ 파이프라인 이상 ${anomalies.length}건 감지`,
+      html,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "알 수 없는 오류";
+    throw new Error(`[mailer] 헬스 점검 알림 발송 실패: ${message}`);
+  }
+}
+
 export async function sendToTistory(content: GeneratedContent): Promise<void> {
   if (!autoPublishTistory) {
     throw new Error(

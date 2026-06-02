@@ -416,27 +416,35 @@ const CHANNEL_MAX_TOKENS: Record<ChannelType, number> = {
   naver_cafe: 4500,
 };
 
+interface BuiltPrompt {
+  /** 채널별로 고정된 지시문. system 블록으로 보내 prompt caching 대상이 된다. */
+  system: string;
+  /** 영상마다 달라지는 입력(자막). user 메시지로 보낸다(데이터=user 역할 분리). */
+  user: string;
+}
+
 function buildPrompt(
   videoTranscript: string,
   videoTitle: string,
   channelType: ChannelType,
-): string {
+): BuiltPrompt {
   const channelGuide = CHANNEL_PROMPTS[channelType];
-  const transcriptBlock = buildTranscriptBlock(videoTitle, videoTranscript);
+  const user = buildTranscriptBlock(videoTitle, videoTranscript);
 
-  // Threads/Instagram 은 공식 운영자 톤과 정반대인 시청자/팬·마케터 톤을
-  // 사용한다. 공통 규칙(CORE_MUST_FOLLOW / TONE_AND_MANNER / REQUIRED_CTA)은
-  // CTA 박스·운영자 톤·박스/이모지 장식을 강제하므로 자연스러운 톤과 충돌 → 우회.
-  // 차종 매칭/출고 정확성/사실성/자막 카피 금지/광고문체 회피는 channelGuide 안
-  // 에서 자체 명시함.
+  // 안정적인 지시문(역할·규칙·채널 가이드·출력 규칙)은 system 으로, 영상마다
+  // 바뀌는 자막만 user 로 분리한다. system 은 채널별로 동일하므로 같은 채널의
+  // CTA 재시도·다영상 호출에서 prompt cache 가 히트해 비용/지연이 준다.
+  //
+  // Threads/Instagram 은 공식 운영자 톤과 정반대인 시청자/팬·마케터 톤을 쓴다.
+  // 공통 규칙(CORE_MUST_FOLLOW / TONE_AND_MANNER / REQUIRED_CTA)은 CTA 박스·
+  // 운영자 톤·장식을 강제하므로 자연스러운 톤과 충돌 → 우회. 차종 매칭/출고
+  // 정확성/사실성/자막 카피 금지/광고문체 회피는 channelGuide 안에서 자체 명시함.
   if (channelType === "threads") {
-    return `
+    const system = `
 당신은 Threads 전용 브랜드 마케터입니다.
 아래 채널 가이드를 정확히 따라 본문 1개를 생성하세요.
 
 ${channelGuide}
-
-${transcriptBlock}
 
 [출력 규칙]
 - 반드시 save_content_draft 툴을 호출해서 결과를 저장하세요.
@@ -445,17 +453,16 @@ ${transcriptBlock}
 - 본문에 CTA(전화·카톡·홈페이지·유튜브·카페)·해시태그·이모지·박스 구분자
   절대 포함 금지.
 `.trim();
+    return { system, user };
   }
 
   if (channelType === "instagram") {
-    return `
+    const system = `
 당신은 나우카 채널 릴스를 막 본 자동차 관심 시청자입니다.
 공식 운영자가 아니라 영상 본 후 자기 SNS 에 짧게 메모하는 톤으로 씁니다.
 아래 채널 가이드를 정확히 따라 본문 1개를 생성하세요.
 
 ${channelGuide}
-
-${transcriptBlock}
 
 [출력 규칙]
 - 반드시 save_content_draft 툴을 호출해서 결과를 저장하세요.
@@ -468,9 +475,10 @@ ${transcriptBlock}
 - title / meta_description 는 null, hashtags 는 영상 차종 + 자동차/리스/장기렌트
   관련 10~15개.
 `.trim();
+    return { system, user };
   }
 
-  return `
+  const system = `
 당신은 자동차 금융/장기렌트/리스 콘텐츠를 제작하는 나우카 공식 운영팀 AI 어시스턴트입니다.
 아래 MUST FOLLOW 규칙을 최우선으로 지키며 ${channelType} 채널용 콘텐츠 1개를 생성하세요.
 
@@ -480,13 +488,12 @@ ${TONE_AND_MANNER}
 ${REQUIRED_CTA_SYSTEM_RULE}
 ${channelGuide}
 
-${transcriptBlock}
-
 [출력 규칙]
 - 반드시 save_content_draft 툴을 호출해서 결과를 저장하세요.
 - title/body/hashtags/meta_description 4개 필드를 모두 채우세요.
 - 채널에 필요 없는 값은 null 로 두세요.
 `.trim();
+  return { system, user };
 }
 
 /**
@@ -619,6 +626,17 @@ export async function generateContentWithUsage(
       model: MODEL,
       max_tokens: CHANNEL_MAX_TOKENS[channelType],
       temperature: CHANNEL_TEMPERATURE[channelType],
+      // 채널별로 고정된 지시문은 system 으로 보내고 cache_control 로 캐싱한다.
+      // 같은 채널의 CTA 재시도·다영상 호출에서 tools+system 프리픽스가 캐시 히트
+      // → 입력 토큰 비용/지연 절감. (캐시 breakpoint 는 system 끝에 설정되어
+      //   그 앞의 tools 정의까지 함께 캐싱된다.)
+      system: [
+        {
+          type: "text",
+          text: prompt.system,
+          cache_control: { type: "ephemeral" },
+        },
+      ],
       // tool_use 강제 — 모델이 schema-valid 한 JSON 객체를 직접 반환하므로
       // 본문 따옴표/줄바꿈 escape 문제로 JSON.parse 가 깨질 일이 없다.
       tools: [CONTENT_DRAFT_TOOL],
@@ -626,7 +644,7 @@ export async function generateContentWithUsage(
       messages: [
         {
           role: "user",
-          content: prompt,
+          content: prompt.user,
         },
       ],
     });

@@ -62,6 +62,12 @@ function requireEnv(name: string): string {
 const NAVER_CAFE_AUTO_PUBLISH_PAUSED = true;
 
 export function isNaverCafeAutoPublishEnabled(): boolean {
+  // 운영자 탈출구: 네이버 계정 정상화 후 코드 수정/재배포 없이 Vercel 대시보드에서
+  // NAVER_CAFE_FORCE_RESUME=true 만 설정하면 일시정지를 해제하고 즉시 재개할 수 있다.
+  // (한글 사용자명으로 vercel CLI 를 못 쓰는 환경이라 env 토글이 가장 빠른 복구 경로.)
+  if (process.env.NAVER_CAFE_FORCE_RESUME === "true") {
+    return process.env.AUTO_PUBLISH_NAVER_CAFE === "true";
+  }
   if (NAVER_CAFE_AUTO_PUBLISH_PAUSED) return false;
   return process.env.AUTO_PUBLISH_NAVER_CAFE === "true";
 }
