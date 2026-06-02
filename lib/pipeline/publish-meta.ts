@@ -582,7 +582,7 @@ export async function runPublishMetaStep(): Promise<PublishMetaResult> {
       .from("generated_contents")
       .select("channel_type, body, hashtags")
       .eq("video_id", video.id)
-      .in("channel_type", ["instagram", "naver_blog", "threads"])
+      .in("channel_type", ["instagram", "threads"])
       .not("status", "in", "(failed,cta_incomplete)");
 
     if (contentsError) {
@@ -597,7 +597,6 @@ export async function runPublishMetaStep(): Promise<PublishMetaResult> {
 
     const contents = (contentsRaw ?? []) as ContentRow[];
     const igContent = contents.find((c) => c.channel_type === "instagram");
-    const blogContent = contents.find((c) => c.channel_type === "naver_blog");
     const thContent = contents.find((c) => c.channel_type === "threads");
 
     // ────────────────────────────────────
@@ -718,7 +717,7 @@ export async function runPublishMetaStep(): Promise<PublishMetaResult> {
 
     // ────────────────────────────────────
     // (B) 페이스북 Reels 네이티브 영상 발행
-    //    → 캡션 우선순위: instagram 본문 > naver_blog 본문
+    //    → 캡션은 instagram 본문만 사용(FB 릴스도 IG 와 동일한 시청자/팬 톤).
     //    → storage_path 가 없으면 로컬 워커 완료까지 스킵
     // ────────────────────────────────────
     if (needFb) {
@@ -729,12 +728,16 @@ export async function runPublishMetaStep(): Promise<PublishMetaResult> {
         );
         result.facebook_skipped_count += 1;
       } else {
+        // FB 릴스는 IG 와 동일한 시청자/팬 톤이 필수. naver_blog 본문(운영자 톤 +
+        // 5종 CTA 박스 + 2000자)으로 폴백하면 톤 정책 위반 → Threads 와 동일하게
+        // 폴백 금지하고 스킵. (데이터 2026-06-02: 블로그 폴백은 FB 발행 51건 중
+        // 0건 발동한 dead path 였음 — 잠재 톤 위반 리스크만 제거.)
         const caption = igContent?.body
           ? buildInstagramCaption(igContent.body, igContent.hashtags)
-          : blogContent?.body?.trim() ?? null;
+          : null;
 
         if (!caption) {
-          const msg = `페북 스킵(${video.video_id}): instagram/naver_blog 캡션 소스가 없음`;
+          const msg = `페북 스킵(${video.video_id}): instagram 채널 콘텐츠가 없거나 생성 실패. naver_blog 폴백은 톤 정책 위반이라 사용하지 않음.`;
           console.warn(`[publish-meta] ⚠️  ${msg}`);
           result.errors.push(msg);
           result.facebook_skipped_count += 1;
