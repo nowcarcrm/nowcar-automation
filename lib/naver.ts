@@ -48,7 +48,21 @@ function requireEnv(name: string): string {
   return value;
 }
 
+/**
+ * 네이버 카페 자동발행 일시정지 kill switch.
+ *
+ * 배경(2026-06-02): 2026-05-27 20:20 마지막 성공 이후 6일째 모든 카페 발행이
+ * HTTP 403 / code 999 로 거부됨 = 네이버 계정/카페 레벨 글쓰기 제한(코드로 해제 불가).
+ * 서킷 브레이커가 6시간마다 1회 probe 를 허용해 매번 또 999 → 6시간 간격 실패/메일이
+ * 끝없이 반복되고, 계속 두드리는 것이 오히려 제재를 갱신시킨다. 운영자가 네이버
+ * 계정을 정상화(수동 게시 등)할 때까지 자동발행을 완전히 끄고 네이버를 두드리지 않는다.
+ *
+ * 재개 방법: 아래 상수를 false 로 되돌리면(또는 이 블록 삭제) env 설정대로 다시 동작.
+ */
+const NAVER_CAFE_AUTO_PUBLISH_PAUSED = true;
+
 export function isNaverCafeAutoPublishEnabled(): boolean {
+  if (NAVER_CAFE_AUTO_PUBLISH_PAUSED) return false;
   return process.env.AUTO_PUBLISH_NAVER_CAFE === "true";
 }
 
