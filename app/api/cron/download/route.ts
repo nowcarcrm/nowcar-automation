@@ -236,10 +236,13 @@ async function triggerPipeline(req: NextRequest): Promise<void> {
   }
   const protocol = process.env.VERCEL_URL ? "https" : "http";
   const url = `${protocol}://${host}/api/pipeline/run`;
+  // C-1: pipeline/run 이 이제 CRON_SECRET 을 요구하므로 내부 트리거도 토큰을 전달.
+  const secret = process.env.CRON_SECRET;
 
   try {
     const res = await fetch(url, {
       method: "GET",
+      headers: secret ? { Authorization: `Bearer ${secret}` } : undefined,
       signal: AbortSignal.timeout(5_000),
     });
     console.log(

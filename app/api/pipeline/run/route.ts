@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { isPipelineRequestAuthorized } from "@/lib/cron-auth";
 import { runDetectStep } from "@/lib/pipeline/detect";
 import { runGenerateStep } from "@/lib/pipeline/generate";
 import { runEmailStep } from "@/lib/pipeline/email";
@@ -84,6 +85,14 @@ function toErrorMessage(error: unknown): string {
 }
 
 export async function GET(request: NextRequest) {
+  // C-1: 무인증 외부 트리거 차단. 내부 트리거(cron/download)는 Authorization 헤더로
+  // CRON_SECRET 을 전달한다. 외부 uptime 모니터(cron-job.org)는 ?secret= 필요.
+  if (!isPipelineRequestAuthorized(request)) {
+    return NextResponse.json(
+      { success: false, error: "Unauthorized" },
+      { status: 401 },
+    );
+  }
   const pipelineId = crypto.randomUUID();
   const skipEmail = request.nextUrl.searchParams.get("skip_email") === "true";
   const startedAt = Date.now();
