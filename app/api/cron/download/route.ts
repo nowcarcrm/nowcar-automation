@@ -12,6 +12,7 @@ import {
 import { ensureMetaTokenLoaded } from "@/lib/meta-token";
 import { localWorkerGraceCutoffIso } from "@/lib/download-grace";
 import { runPipelineHealthCheck } from "@/lib/pipeline-health";
+import { recencyCutoffIso } from "@/lib/video-recency";
 
 /**
  * ============================================================
@@ -116,20 +117,35 @@ async function fetchPendingVideos(): Promise<PendingVideo[]> {
   // ytdl 폴백 대상이 된다(= 로컬 워커가 PC off/장애로 처리 못 한 경우).
   // 데이터센터 IP ytdl 봇차단 → 쿠키 경고 메일이 정상 운영 중 발송되는 것을
   // 원천 차단하기 위함. 자세한 배경은 lib/download-grace.ts 참고.
+  // M2: worker.js 와 동일 가드. storage_path IS NULL 만 보면, cleanup 이 발행 후
+  // 파일을 지우며 storage_path 를 NULL 로 되돌린 '이미 발행 완료' 옛 영상을 '다운로드
+  // 필요' 로 오인해 매일 다시 받는다(treadmill) → 신규 영상이 굶음. 그래서
+  //  (a) recency 윈도우 밖(어차피 publish recency 게이트에 막힘) 제외,
+  //  (b) 이미 인스타 발행 성공한 영상(=mp4 더 불필요) 제외.
+  const { data: published } = await supabase
+    .from("social_publishes")
+    .select("video_id")
+    .eq("platform", "instagram")
+    .eq("status", "success");
+  const doneIds = new Set((published ?? []).map((r) => r.video_id));
+
   const { data, error } = await supabase
     .from("youtube_videos")
     .select("id, video_id, title, download_attempts")
     .is("storage_path", null)
     .lt("download_attempts", MAX_ATTEMPTS)
     .lt("created_at", localWorkerGraceCutoffIso())
+    .gte("published_at", recencyCutoffIso())
     .order("created_at", { ascending: true })
-    .limit(BATCH_SIZE);
+    .limit(BATCH_SIZE * 4); // doneIds 제외 후에도 BATCH_SIZE 를 채우도록 여유분
 
   if (error) {
     throw new Error(`youtube_videos 조회 실패: ${error.message}`);
   }
 
-  return (data ?? []) as PendingVideo[];
+  return ((data ?? []) as PendingVideo[])
+    .filter((v) => !doneIds.has(v.video_id))
+    .slice(0, BATCH_SIZE);
 }
 
 async function markDownloaded(

@@ -19,19 +19,29 @@ function requireEnv(name: string): string {
   return value;
 }
 
-const emailUser = requireEnv("EMAIL_USER");
-const emailPass = requireEnv("EMAIL_PASS");
+// M9(SPOF): 모듈 로드 시점에 requireEnv 로 throw 하면 EMAIL_USER/PASS 미설정 시
+// 이 모듈을 import 하는 /api/pipeline/run 등 엔드포인트 전체가 import 단계에서
+// 죽는다. 값은 lazy 로 평가하고, 실제 메일 전송(getTransporter 첫 호출) 시점에만
+// 검증/throw 한다 — 그 throw 는 각 파이프라인 단계 try/catch 에 잡혀 전체를 멈추지 않는다.
+const emailUser = process.env.EMAIL_USER ?? "";
 const tistoryEmail = process.env.TISTORY_EMAIL ?? "";
 const autoPublishTistory = process.env.AUTO_PUBLISH_TISTORY === "true";
 
-// Gmail SMTP 전송기
-const transporter = nodemailer.createTransport({
-  service: "gmail",
-  auth: {
-    user: emailUser,
-    pass: emailPass,
-  },
-});
+// Gmail SMTP 전송기 (lazy 생성)
+let cachedTransporter: ReturnType<typeof nodemailer.createTransport> | null =
+  null;
+function getTransporter(): ReturnType<typeof nodemailer.createTransport> {
+  if (!cachedTransporter) {
+    cachedTransporter = nodemailer.createTransport({
+      service: "gmail",
+      auth: {
+        user: requireEnv("EMAIL_USER"),
+        pass: requireEnv("EMAIL_PASS"),
+      },
+    });
+  }
+  return cachedTransporter;
+}
 
 const CHANNEL_ORDER: ChannelType[] = [
   "naver_blog",
@@ -172,7 +182,7 @@ export async function sendContentEmail(
       </div>
     `;
 
-    await transporter.sendMail({
+    await getTransporter().sendMail({
       from: `"Nowcar Auto" <${emailUser}>`,
       to: emailUser,
       subject: `[나우카 자동화] 신규 콘텐츠 5종 - ${videoTitle}`,
@@ -240,7 +250,7 @@ export async function sendCookieExpiredAlert(
   `;
 
   try {
-    await transporter.sendMail({
+    await getTransporter().sendMail({
       from: `"Nowcar Auto" <${emailUser}>`,
       to: emailUser,
       subject: "[나우카 자동화] 🚨 YouTube 다운로드 실패 (Drive 사본 업로드 권장)",
@@ -279,7 +289,7 @@ export async function sendMetaTokenRefreshFailedAlert(
   `;
 
   try {
-    await transporter.sendMail({
+    await getTransporter().sendMail({
       from: `"Nowcar Auto" <${emailUser}>`,
       to: emailUser,
       subject: "[나우카 자동화] 🚨 Meta 토큰 자동 갱신 실패",
@@ -319,7 +329,7 @@ export async function sendNaverCafeBlockedAlert(
   `;
 
   try {
-    await transporter.sendMail({
+    await getTransporter().sendMail({
       from: `"Nowcar Auto" <${emailUser}>`,
       to: emailUser,
       subject: "[나우카 자동화] 🚨 네이버 카페 발행 차단 (999) — 계정 확인 필요",
@@ -376,7 +386,7 @@ export async function sendPipelineHealthAlert(
   `;
 
   try {
-    await transporter.sendMail({
+    await getTransporter().sendMail({
       from: `"Nowcar Auto" <${emailUser}>`,
       to: emailUser,
       subject: `[나우카 자동화] ⚠️ 파이프라인 이상 ${anomalies.length}건 감지`,
@@ -411,7 +421,7 @@ export async function sendToTistory(content: GeneratedContent): Promise<void> {
   `;
 
   try {
-    await transporter.sendMail({
+    await getTransporter().sendMail({
       from: `"Nowcar Auto" <${emailUser}>`,
       to: tistoryEmail,
       subject,
