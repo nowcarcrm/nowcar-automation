@@ -136,6 +136,10 @@ async function fetchPendingVideos(): Promise<PendingVideo[]> {
     .lt("download_attempts", MAX_ATTEMPTS)
     .lt("created_at", localWorkerGraceCutoffIso())
     .gte("published_at", recencyCutoffIso())
+    // M3/L15: 롱폼(>MAX) 제외 — Meta 발행 불가 영상은 받지 않는다(duration NULL 은 허용).
+    .or(
+      `duration_seconds.is.null,duration_seconds.lte.${parseInt(process.env.MAX_SHORT_PUBLISH_SECONDS || "120", 10)}`,
+    )
     .order("created_at", { ascending: true })
     .limit(BATCH_SIZE * 4); // doneIds 제외 후에도 BATCH_SIZE 를 채우도록 여유분
 

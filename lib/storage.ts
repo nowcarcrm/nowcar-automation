@@ -419,38 +419,49 @@ export async function listExpiredVideos(
   olderThanHours = 24,
 ): Promise<StorageObject[]> {
   const supabase = createAdminClient();
-
-  const { data, error } = await supabase.storage
-    .from(TEMP_VIDEOS_BUCKET)
-    .list("", {
-      limit: 1000,
-      sortBy: { column: "created_at", order: "asc" },
-    });
-
-  if (error) {
-    throw new Error(`[storage] 파일 목록 조회 실패: ${error.message}`);
-  }
-
   const thresholdMs = Date.now() - olderThanHours * 60 * 60 * 1000;
 
-  return (data ?? [])
-    .map((obj) => {
+  // L7: .list 는 한 번에 최대 1000개만 반환한다. 페이지네이션 없이 1페이지만 보면
+  // 파일이 1000개 넘게 쌓였을 때 오래된 1000개 밖은 영구 미삭제(스토리지 누수).
+  // offset 으로 전 페이지를 순회해 만료 대상을 모두 수집한다.
+  const PAGE = 1000;
+  const expired: StorageObject[] = [];
+  for (let offset = 0; ; offset += PAGE) {
+    const { data, error } = await supabase.storage
+      .from(TEMP_VIDEOS_BUCKET)
+      .list("", {
+        limit: PAGE,
+        offset,
+        sortBy: { column: "created_at", order: "asc" },
+      });
+
+    if (error) {
+      throw new Error(`[storage] 파일 목록 조회 실패: ${error.message}`);
+    }
+
+    const page = data ?? [];
+    for (const obj of page) {
       const meta = obj as unknown as {
         name: string;
         created_at?: string | null;
         metadata?: { size?: number | null } | null;
       };
-      return {
-        name: meta.name,
-        createdAt: meta.created_at ?? null,
-        sizeBytes: meta.metadata?.size ?? null,
-      } satisfies StorageObject;
-    })
-    .filter((obj) => {
-      if (!obj.createdAt) return false;
-      const createdAtMs = new Date(obj.createdAt).getTime();
-      return Number.isFinite(createdAtMs) && createdAtMs < thresholdMs;
-    });
+      const createdAt = meta.created_at ?? null;
+      if (!createdAt) continue;
+      const createdAtMs = new Date(createdAt).getTime();
+      if (Number.isFinite(createdAtMs) && createdAtMs < thresholdMs) {
+        expired.push({
+          name: meta.name,
+          createdAt,
+          sizeBytes: meta.metadata?.size ?? null,
+        } satisfies StorageObject);
+      }
+    }
+
+    if (page.length < PAGE) break; // 마지막 페이지
+  }
+
+  return expired;
 }
 
 /**

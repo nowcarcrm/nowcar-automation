@@ -457,6 +457,12 @@ export async function runPublishNaverCafeStep(): Promise<PublishNaverCafeResult>
         // 서킷 브레이커가 재차단(backoff)한다.
         if (isNaverCafe999Error(msg)) {
           await notifyNaverCafeBlockIfNeeded({ sampleError: msg });
+          // M7/M8/L9: 999(연속등록 불가) 차단이면 이번 사이클은 첫 probe 1건에서
+          // 즉시 종료. 안 그러면 후보 영상 전부에 연속 POST → 계정 차단 연장 스톰.
+          console.log(
+            "[publish-naver-cafe] 🛑 999 차단 감지 → 이번 사이클 probe 1건에서 중단",
+          );
+          break;
         }
       }
     } catch (error) {
@@ -493,6 +499,11 @@ export async function runPublishNaverCafeStep(): Promise<PublishNaverCafeResult>
       // probe 시도가 다시 999 면 차단 지속 → 알림(throttled).
       if (isNaverCafe999Error(msg)) {
         await notifyNaverCafeBlockIfNeeded({ sampleError: msg });
+        // M7/M8/L9: 999 차단이면 이번 사이클 즉시 중단(첫 probe 1건만).
+        console.log(
+          "[publish-naver-cafe] 🛑 999 차단 감지 → 이번 사이클 probe 1건에서 중단",
+        );
+        break;
       }
     }
   }

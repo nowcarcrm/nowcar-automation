@@ -61,6 +61,9 @@ const MAX_GENERATE_ATTEMPTS = 3;
 // transcript 가 이 임계값보다 짧으면 description fallback 으로 채워진 것이므로
 // Whisper STT 로 영상 음성을 직접 받아 보강한다.
 const TRANSCRIPT_MIN_CHARS = 200;
+// M4: 이 길이(초)를 넘는 롱폼은 ytdl 로 영상 전체를 버퍼에 받아도 Whisper 25MB
+// 한도에 막혀 매번 다운로드·대역폭만 낭비되므로 STT 자체를 스킵하고 description 폴백.
+const MAX_STT_SECONDS = parseInt(process.env.MAX_STT_SECONDS || "600", 10);
 
 function toErrorMessage(error: unknown): string {
   if (error instanceof Error) {
@@ -192,7 +195,16 @@ export async function GET(request?: NextRequest) {
       //    - 없으면 (다운로드 워커가 아직 처리 못 한 흔한 race) ytdl-core 로 직접 다운로드
       let baseText = video.transcript?.trim() ?? "";
 
-      if (baseText.length < TRANSCRIPT_MIN_CHARS) {
+      const isLongformForStt =
+        video.duration_seconds != null &&
+        video.duration_seconds > MAX_STT_SECONDS;
+      if (baseText.length < TRANSCRIPT_MIN_CHARS && isLongformForStt) {
+        // M4: 롱폼은 Whisper 25MB 한도에 막혀 STT 가 실패할 게 뻔하므로 다운로드 자체를
+        // 생략하고 description 폴백으로 진행(대역폭/시간 낭비 차단).
+        console.warn(
+          `[content/generate] ⏭ 롱폼(${video.duration_seconds}s) Whisper STT 스킵 → description 폴백: ${video.title}`,
+        );
+      } else if (baseText.length < TRANSCRIPT_MIN_CHARS) {
         console.log(
           `[content/generate] transcript 부족(${baseText.length}자) → Whisper STT 시도: ${video.title}`,
         );
