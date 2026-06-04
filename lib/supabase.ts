@@ -44,7 +44,12 @@ type YouTubeVideoInsert = Omit<
   duration_seconds?: number | null;
 };
 
-type GeneratedContentInsert = Omit<GeneratedContent, "id" | "created_at">;
+// M10: email_sent 는 의도적으로 optional. saveGeneratedContents 가 upsert payload
+// 에서 제외해, 재처리 시 기존 발송상태(true)를 false 로 덮어쓰지 않도록 한다.
+type GeneratedContentInsert = Omit<
+  GeneratedContent,
+  "id" | "created_at" | "email_sent"
+> & { email_sent?: boolean };
 
 function requireEnv(name: string): string {
   const value = process.env[name];
@@ -153,11 +158,14 @@ export async function updateVideoTranscript(
 export async function saveGeneratedContents(
   contents: GeneratedContentInsert[],
 ): Promise<GeneratedContent[]> {
-  // 생성 직후 콘텐츠는 항상 미발송 상태로 시작하도록 강제
-  const normalizedContents = contents.map((content) => ({
-    ...content,
-    email_sent: false,
-  }));
+  // M10: email_sent 를 upsert payload 에서 제외한다. 포함하면 재처리(재시도/cron
+  // 재트리거) 시 기존 email_sent=true 가 false 로 덮어써져 대표 리포트 메일이 중복
+  // 발송된다. 신규 행은 DB default(false)로 시작하고, 기존(conflict) 행의 값은 보존.
+  const normalizedContents = contents.map((content) => {
+    const copy = { ...content };
+    delete copy.email_sent;
+    return copy;
+  });
 
   // M-4: insert → upsert. (video_id, channel_type) 유니크 인덱스와 함께 멱등성 보장.
   // 같은 영상이 재처리(재시도/cron 재트리거)돼도 채널별 행이 중복 누적되지 않고

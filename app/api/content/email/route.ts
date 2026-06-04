@@ -97,6 +97,9 @@ export async function GET() {
         .from("generated_contents")
         .select("id,video_id,channel_type,title,body,hashtags,meta_description")
         .eq("email_sent", false)
+        // 실패/미완성(failed, cta_incomplete) 행은 절대 메일로 내보내지 않는다.
+        // (body 가 "콘텐츠 생성 실패: ..." 인 실패 플레이스홀더가 대표 메일로 나가는 것 방지)
+        .not("status", "in", "(failed,cta_incomplete)")
         .order("created_at", { ascending: true });
 
       if (fallbackError) {
