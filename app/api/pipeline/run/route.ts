@@ -142,11 +142,15 @@ export async function GET(request: NextRequest) {
   try {
     console.log("[1/3] 🎬 YouTube 영상 감지 중...");
     const data = await runDetectStep();
-    step1.status = "ok";
     step1.new_videos_count = data.new_videos_count ?? 0;
     step1.existing_videos_count = data.existing_videos_count ?? 0;
     if ((data.errors.length ?? 0) > 0) {
       errors.push(...data.errors.map((error) => `[step1_detect] ${error}`));
+      // M1: detect 가 부분/완전 실패(쿼터 소진·API 키 오류 등)해도 'ok' 로 묻던 것을
+      // error 로 반영 → body.success/이메일 리포트/모니터링이 실제 상태를 드러낸다.
+      step1.status = "error";
+    } else {
+      step1.status = "ok";
     }
     step1.duration_seconds = Math.round((Date.now() - step1StartedAt) / 1000);
     console.log(

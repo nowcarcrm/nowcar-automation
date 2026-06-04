@@ -1,4 +1,5 @@
 import { createClient } from "@supabase/supabase-js";
+import { recencyCutoffIso } from "./video-recency";
 
 export type ChannelType =
   | "naver_blog"
@@ -79,10 +80,14 @@ export const supabase = createClient(supabaseUrl, supabaseServerKey, {
 });
 
 export async function getUnprocessedVideos(): Promise<YouTubeVideo[]> {
+  // L16: recency 방어선. detect/publish-meta 와 동일하게 발행 윈도우(기본 14일)보다
+  // 오래된 미처리 영상은 generate 대상에서 제외한다(옛 영상 Claude/Whisper 재생성 +
+  // 옛 콘텐츠 대표 리포트 메일 차단). published_at NULL 은 허용(레거시/미수집 영상).
   const { data, error } = await supabase
     .from("youtube_videos")
     .select("*")
     .eq("processed", false)
+    .or(`published_at.is.null,published_at.gte.${recencyCutoffIso()}`)
     .order("published_at", { ascending: false });
 
   if (error) {
@@ -208,12 +213,16 @@ export async function markContentEmailSent(contentId: string): Promise<void> {
 }
 
 export async function getPendingTistoryContents(): Promise<GeneratedContent[]> {
+  // M11: AUTO_PUBLISH_TISTORY 를 켜는 순간 수주치 적체 pending 이 한 사이클에 일괄
+  // 메일 발송되는 폭주 방지 — recency(최근 ~14일) + 사이클당 배치 한도(10건).
   const { data, error } = await supabase
     .from("generated_contents")
     .select("*")
     .eq("channel_type", "tistory")
     .eq("status", "pending")
-    .order("created_at", { ascending: true });
+    .gte("created_at", recencyCutoffIso())
+    .order("created_at", { ascending: true })
+    .limit(10);
 
   if (error) {
     throw new Error(`[supabase] 티스토리 대기 콘텐츠 조회 실패: ${error.message}`);

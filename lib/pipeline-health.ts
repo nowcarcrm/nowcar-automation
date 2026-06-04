@@ -93,6 +93,16 @@ export async function runPipelineHealthCheck(): Promise<HealthCheckResult> {
 
     // --- 2) 미다운로드 백로그 (recency 윈도우 내 영상만) ---
     try {
+      // M17: storage_path NULL 단독은 미다운로드 신호로 부적합 — cleanup 이 발행 후
+      // storage_path 를 NULL 로 되돌리므로 '이미 발행 완료' 영상까지 백로그로 오집계돼
+      // 100% 거짓 경보가 났다. 인스타 발행 성공 영상을 제외해 진짜 미다운로드만 본다.
+      const { data: igDone } = await supabase
+        .from("social_publishes")
+        .select("video_id")
+        .eq("platform", "instagram")
+        .eq("status", "success");
+      const igDoneIds = new Set((igDone ?? []).map((r) => r.video_id));
+
       const { data, error } = await supabase
         .from("youtube_videos")
         .select("video_id, title, created_at")
@@ -100,12 +110,13 @@ export async function runPipelineHealthCheck(): Promise<HealthCheckResult> {
         .gte("published_at", recencyCutoffIso())
         .lt("created_at", hoursAgoIso(UNDOWNLOADED_STALE_HOURS))
         .order("created_at", { ascending: true })
-        .limit(20);
-      if (!error && data && data.length > 0) {
-        const oldest = data[0];
+        .limit(50);
+      const backlog = (data ?? []).filter((r) => !igDoneIds.has(r.video_id));
+      if (!error && backlog.length > 0) {
+        const oldest = backlog[0];
         anomalies.push({
           key: "undownloaded_backlog",
-          title: `미다운로드 백로그 ${data.length}건 (${UNDOWNLOADED_STALE_HOURS}h+)`,
+          title: `미다운로드 백로그 ${backlog.length}건 (${UNDOWNLOADED_STALE_HOURS}h+)`,
           detail: `로컬 워커·Drive 둘 다 못 가져온 영상. 가장 오래된: ${oldest?.video_id} (${oldest?.created_at}). 사무실 PC 가동 또는 Drive 사본 업로드 필요.`,
         });
       }
