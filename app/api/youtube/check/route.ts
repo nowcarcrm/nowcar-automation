@@ -1,7 +1,8 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { getLatestVideos, getVideoTranscript } from "@/lib/youtube";
 import { saveVideo, supabase } from "@/lib/supabase";
 import { getMaxVideoAgeDays, isWithinRecency } from "@/lib/video-recency";
+import { isPipelineRequestAuthorized } from "@/lib/cron-auth";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -31,7 +32,16 @@ function toErrorMessage(error: unknown): string {
   return "알 수 없는 오류";
 }
 
-export async function GET() {
+export async function GET(request?: NextRequest) {
+  // M16: 무인증이면 익명이 YouTube API 쿼터를 소모하고 youtube_videos 에 write 를
+  // 유발할 수 있다. 내부 호출(detect 의 runYoutubeCheck())은 request 미전달로 면제.
+  if (!isPipelineRequestAuthorized(request)) {
+    return NextResponse.json(
+      { success: false, error: "Unauthorized" },
+      { status: 401 },
+    );
+  }
+
   const errors: string[] = [];
   const newVideos: NewVideoResult[] = [];
 

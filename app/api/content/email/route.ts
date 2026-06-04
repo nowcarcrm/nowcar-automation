@@ -1,6 +1,7 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { sendContentEmail, type EmailContentItem } from "@/lib/mailer";
 import { markContentEmailSent, supabase, type ChannelType } from "@/lib/supabase";
+import { isPipelineRequestAuthorized } from "@/lib/cron-auth";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -46,7 +47,16 @@ function toErrorMessage(error: unknown): string {
   return "알 수 없는 오류";
 }
 
-export async function GET() {
+export async function GET(request?: NextRequest) {
+  // L13: 무인증이면 익명이 운영자 메일 발송을 트리거할 수 있다. 내부 호출
+  // (runEmailStep 의 runContentEmail())은 request 미전달로 면제.
+  if (!isPipelineRequestAuthorized(request)) {
+    return NextResponse.json(
+      { success: false, error: "Unauthorized" },
+      { status: 401 },
+    );
+  }
+
   const errors: string[] = [];
   const results: EmailResultItem[] = [];
   let sentCount = 0;
