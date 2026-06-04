@@ -117,6 +117,25 @@ export async function markVideoProcessed(videoId: string): Promise<void> {
   }
 }
 
+// H1: 채널 일부 실패로 processed 를 보류할 때 재시도 횟수를 기록한다.
+// MAX_GENERATE_ATTEMPTS 도달 전까지 다음 사이클에 재생성되도록 하되, 영구
+// 실패 영상이 무한 재생성되는 것을 막는 카운터.
+export async function bumpVideoGenerationAttempts(
+  videoId: string,
+  attempts: number,
+): Promise<void> {
+  const { error } = await supabase
+    .from("youtube_videos")
+    .update({ generation_attempts: attempts })
+    .eq("id", videoId);
+
+  if (error) {
+    throw new Error(
+      `[supabase] generation_attempts 업데이트 실패: ${error.message}`,
+    );
+  }
+}
+
 export async function updateVideoTranscript(
   videoId: string,
   transcript: string,

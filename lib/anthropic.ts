@@ -624,48 +624,63 @@ export async function generateContentWithUsage(
 ): Promise<GeneratedDraftWithUsage> {
   try {
     const prompt = buildPrompt(videoTranscript, videoTitle, channelType);
-    const response = await anthropic.messages.create({
-      model: MODEL,
-      max_tokens: CHANNEL_MAX_TOKENS[channelType],
-      temperature: CHANNEL_TEMPERATURE[channelType],
-      // 채널별로 고정된 지시문은 system 으로 보내고 cache_control 로 캐싱한다.
-      // 같은 채널의 CTA 재시도·다영상 호출에서 tools+system 프리픽스가 캐시 히트
-      // → 입력 토큰 비용/지연 절감. (캐시 breakpoint 는 system 끝에 설정되어
-      //   그 앞의 tools 정의까지 함께 캐싱된다.)
-      system: [
-        {
-          type: "text",
-          text: prompt.system,
-          cache_control: { type: "ephemeral" },
-        },
-      ],
-      // tool_use 강제 — 모델이 schema-valid 한 JSON 객체를 직접 반환하므로
-      // 본문 따옴표/줄바꿈 escape 문제로 JSON.parse 가 깨질 일이 없다.
-      tools: [CONTENT_DRAFT_TOOL],
-      tool_choice: { type: "tool", name: CONTENT_DRAFT_TOOL_NAME },
-      messages: [
-        {
-          role: "user",
-          content: prompt.user,
-        },
-      ],
-    });
+    // H2: tool_use 응답의 body 가 빈 문자열로 오면 parseDraftFromResponse 가 throw.
+    // 과거엔 이 throw 가 generateWithCtaRetry 의 try/catch 밖이라 재시도 0회로 즉시
+    // 'failed' 확정 → (부분 실패 영구누락과 결합) 채널 콘텐츠 영구 손실로 이어졌다.
+    // 파싱 실패(빈 body/legacy JSON 깨짐)를 최대 MAX_PARSE_RETRY 회 추가 재호출로 방어.
+    const MAX_PARSE_RETRY = 2;
+    let lastParseError: unknown = null;
+    for (let attempt = 0; attempt <= MAX_PARSE_RETRY; attempt += 1) {
+      const response = await anthropic.messages.create({
+        model: MODEL,
+        max_tokens: CHANNEL_MAX_TOKENS[channelType],
+        temperature: CHANNEL_TEMPERATURE[channelType],
+        // 채널별 고정 지시문은 system 으로 보내고 cache_control 로 캐싱(입력 토큰 절감).
+        system: [
+          {
+            type: "text",
+            text: prompt.system,
+            cache_control: { type: "ephemeral" },
+          },
+        ],
+        // tool_use 강제 — schema-valid JSON 직접 반환으로 escape 깨짐 방지.
+        tools: [CONTENT_DRAFT_TOOL],
+        tool_choice: { type: "tool", name: CONTENT_DRAFT_TOOL_NAME },
+        messages: [
+          {
+            role: "user",
+            content: prompt.user,
+          },
+        ],
+      });
 
-    const parsed = parseDraftFromResponse(response);
-
-    return {
-      draft: {
-        channel_type: channelType,
-        title: parsed.title,
-        body: parsed.body,
-        hashtags: parsed.hashtags,
-        meta_description: parsed.meta_description,
-      },
-      usage: {
-        input_tokens: response.usage.input_tokens,
-        output_tokens: response.usage.output_tokens,
-      },
-    };
+      try {
+        const parsed = parseDraftFromResponse(response);
+        return {
+          draft: {
+            channel_type: channelType,
+            title: parsed.title,
+            body: parsed.body,
+            hashtags: parsed.hashtags,
+            meta_description: parsed.meta_description,
+          },
+          usage: {
+            input_tokens: response.usage.input_tokens,
+            output_tokens: response.usage.output_tokens,
+          },
+        };
+      } catch (parseError) {
+        lastParseError = parseError;
+        console.warn(
+          `[anthropic] ${channelType} 응답 파싱 실패 → 재호출(${attempt + 1}/${MAX_PARSE_RETRY + 1}): ${
+            parseError instanceof Error ? parseError.message : String(parseError)
+          }`,
+        );
+      }
+    }
+    throw lastParseError instanceof Error
+      ? lastParseError
+      : new Error("응답 파싱 반복 실패");
   } catch (error) {
     const message = error instanceof Error ? error.message : "알 수 없는 오류";
     throw new Error(`[anthropic] ${channelType} 콘텐츠 생성 실패: ${message}`);

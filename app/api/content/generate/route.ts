@@ -7,6 +7,7 @@ import {
 import {
   getUnprocessedVideos,
   markVideoProcessed,
+  bumpVideoGenerationAttempts,
   saveGeneratedContents,
   updateVideoTranscript,
   type ChannelType,
@@ -53,6 +54,10 @@ const CHANNEL_TYPES: ChannelType[] = [
 ];
 const CTA_REQUIRED_TOKENS = ["www.나우카.com", "초대박신차의성지", "유튜브"] as const;
 const MAX_CTA_RETRY = 2;
+// H1: 채널 일부가 'failed' 면 processed 를 보류하고 다음 사이클에 재생성한다.
+// 단 영구 실패 영상이 무한 재생성(비용 폭주)되지 않도록 이 횟수까지만 재시도하고
+// 도달 시 포기(processed=true + 경보)한다.
+const MAX_GENERATE_ATTEMPTS = 3;
 // transcript 가 이 임계값보다 짧으면 description fallback 으로 채워진 것이므로
 // Whisper STT 로 영상 음성을 직접 받아 보강한다.
 const TRANSCRIPT_MIN_CHARS = 200;
@@ -362,15 +367,51 @@ export async function GET(request?: NextRequest) {
       }
 
       if (savedOk) {
-        try {
-          await markVideoProcessed(video.id);
-          console.log(`[content/generate] 영상 처리 완료 표시: ${video.title}`);
-        } catch (error) {
-          const message = toErrorMessage(error);
-          errors.push(`[video_id=${video.video_id}] processed 업데이트 실패: ${message}`);
-          console.error(
-            `[content/generate] processed 업데이트 실패: ${video.title} - ${message}`,
-          );
+        // H1: 채널 일부라도 status='failed' 면 processed=true 로 찍지 않는다.
+        // 찍으면 getUnprocessedVideos 가 이 영상을 다시 안 줘서 실패 채널이
+        // 영구 누락된다(2026-05-21~24 사고의 부분실패형 잔존). 대신 다음 사이클에
+        // 재생성하되, generation_attempts 로 MAX_GENERATE_ATTEMPTS 회까지만
+        // 재시도하고 한도 도달 시 포기(processed=true)하며 경보를 남긴다.
+        const hasFailedChannel = rowsToInsert.some((r) => r.status === "failed");
+        const priorAttempts =
+          (video as { generation_attempts?: number }).generation_attempts ?? 0;
+        const giveUp = priorAttempts + 1 >= MAX_GENERATE_ATTEMPTS;
+
+        if (hasFailedChannel && !giveUp) {
+          try {
+            await bumpVideoGenerationAttempts(video.id, priorAttempts + 1);
+            console.warn(
+              `[content/generate] ↻ 채널 일부 실패 → processed 보류, 재시도(${priorAttempts + 1}/${MAX_GENERATE_ATTEMPTS}): ${video.title}`,
+            );
+          } catch (error) {
+            const message = toErrorMessage(error);
+            errors.push(
+              `[video_id=${video.video_id}] generation_attempts 증가 실패: ${message}`,
+            );
+            console.error(
+              `[content/generate] generation_attempts 증가 실패: ${video.title} - ${message}`,
+            );
+          }
+        } else {
+          if (hasFailedChannel) {
+            const failedChannels = rowsToInsert
+              .filter((r) => r.status === "failed")
+              .map((r) => r.channel_type)
+              .join(", ");
+            const giveUpMsg = `[video_id=${video.video_id}] 생성 ${MAX_GENERATE_ATTEMPTS}회 실패로 포기(processed 처리) — 누락 채널: ${failedChannels}`;
+            errors.push(giveUpMsg);
+            console.error(`[content/generate] ⛔ ${giveUpMsg}`);
+          }
+          try {
+            await markVideoProcessed(video.id);
+            console.log(`[content/generate] 영상 처리 완료 표시: ${video.title}`);
+          } catch (error) {
+            const message = toErrorMessage(error);
+            errors.push(`[video_id=${video.video_id}] processed 업데이트 실패: ${message}`);
+            console.error(
+              `[content/generate] processed 업데이트 실패: ${video.title} - ${message}`,
+            );
+          }
         }
       }
 
