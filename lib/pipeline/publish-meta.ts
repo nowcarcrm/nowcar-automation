@@ -358,30 +358,45 @@ async function updatePublishPendingToFinal(params: {
   captionPreview: string | null;
 }): Promise<void> {
   const supabase = createAdminClient();
-  const { data, error } = await supabase
-    .from("social_publishes")
-    .update({
-      status: params.status,
-      external_id: params.externalId,
-      error_message: params.errorMessage,
-      caption_preview: params.captionPreview,
-      updated_at: new Date().toISOString(),
-    })
-    .eq("video_id", params.videoId)
-    .eq("platform", params.platform)
-    .eq("status", "pending")
-    .is("deleted_at", null)
-    .select("id");
+  // H3: 플랫폼 발행은 성공했는데 이 finalize(pending→success) DB 갱신만 실패하면
+  // 행이 pending 으로 남고, cleanupStalePendingPublishes(TTL) 가 그걸 failed 로
+  // 플립해 멱등성 레코드가 파괴된다 → 다음 사이클 중복 발행. 일시적 DB 오류로
+  // success 가 묻히는 창을 줄이기 위해 최대 3회 재시도한다(특히 status='success').
+  let lastError: { message: string } | null = null;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const { data, error } = await supabase
+      .from("social_publishes")
+      .update({
+        status: params.status,
+        external_id: params.externalId,
+        error_message: params.errorMessage,
+        caption_preview: params.captionPreview,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("video_id", params.videoId)
+      .eq("platform", params.platform)
+      .eq("status", "pending")
+      .is("deleted_at", null)
+      .select("id");
 
-  if (error) {
-    throw new Error(`pending -> ${params.status} 상태 업데이트 실패: ${error.message}`);
-  }
+    if (!error) {
+      if (!data || data.length === 0) {
+        console.warn(
+          `[publish-meta] ⚠️ pending 행 미발견 (race condition 가능): video=${params.videoId}, platform=${params.platform}, target=${params.status}`,
+        );
+      }
+      return;
+    }
 
-  if (!data || data.length === 0) {
+    lastError = error;
     console.warn(
-      `[publish-meta] ⚠️ pending 행 미발견 (race condition 가능): video=${params.videoId}, platform=${params.platform}, target=${params.status}`,
+      `[publish-meta] finalize 갱신 실패(재시도 ${attempt + 1}/3, target=${params.status}): ${error.message}`,
     );
   }
+
+  throw new Error(
+    `pending -> ${params.status} 상태 업데이트 실패(3회): ${lastError?.message ?? "알 수 없음"}`,
+  );
 }
 
 /**
@@ -483,9 +498,15 @@ export async function runPublishMetaStep(): Promise<PublishMetaResult> {
     .in("status", ["success", "pending"]);
 
   if (publishedError) {
-    console.warn(
-      `[publish-meta] social_publishes 조회 실패(진행은 계속): ${publishedError.message}`,
-    );
+    // M6/M13: 이 조회는 "이미 발행된 (video, platform)" = 중복방지의 진실원천이다.
+    // 실패 시 빈 set 으로 계속 진행하면 모든 후보를 '미발행'으로 오인해 recency
+    // 윈도우 전체를 재발행할 수 있다(중복 발행 대량 사고). fail-closed: 이번
+    // 사이클 발행을 통째로 중단한다.
+    const msg = `social_publishes 조회 실패 → 중복방지 불가로 발행 사이클 중단(fail-closed): ${publishedError.message}`;
+    console.error(`[publish-meta] ❌ ${msg}`);
+    result.ok = false;
+    result.errors.push(msg);
+    return result;
   }
 
   const successKey = (videoId: string, platform: string) =>
@@ -501,15 +522,46 @@ export async function runPublishMetaStep(): Promise<PublishMetaResult> {
       .map((r) => successKey(r.video_id, r.platform)),
   );
 
+  // M14: (video, platform) 별 누적 실패 횟수 cap. 영구 실패 영상이 매 사이클
+  // 무한 재발행 시도(비용/로그/DB 오염, 또 cleanup 의 pending→failed 플립과 결합 시
+  // 중복발행 재시도)하는 것을 막는다. 한도 도달 시 해당 (video, platform) 은 스킵.
+  const MAX_META_FAIL_RETRIES = 5;
+  const { data: failedRows, error: failedError } = await supabase
+    .from("social_publishes")
+    .select("video_id, platform")
+    .in("video_id", candidateVideoIds)
+    .eq("status", "failed")
+    .is("deleted_at", null);
+  if (failedError) {
+    // fail-open: 실패 카운트를 못 구하면 cap 미적용(기존 동작). 중복방지의
+    // 진실원천이 아니므로 발행을 막지는 않는다.
+    console.warn(
+      `[publish-meta] 실패 카운트 조회 실패(cap 미적용으로 진행): ${failedError.message}`,
+    );
+  }
+  const failCount = new Map<string, number>();
+  for (const r of failedRows ?? []) {
+    const k = successKey(r.video_id, r.platform);
+    failCount.set(k, (failCount.get(k) ?? 0) + 1);
+  }
+  const overFailCap = (videoId: string, platform: string) =>
+    (failCount.get(successKey(videoId, platform)) ?? 0) >= MAX_META_FAIL_RETRIES;
+
   // 2.5) 후보 영상에서 모든 enabled 플랫폼이 alreadySuccess 인 영상은 미리 제외 →
   //     백로그 영상이 매번 같은 최신 3개에 가려져 영원히 처리 못 되던 문제 해결.
   const pendingVideos = (candidateVideos as VideoRow[]).filter((v) => {
     const needIg =
-      igEnabled && !alreadySuccess.has(successKey(v.video_id, "instagram"));
+      igEnabled &&
+      !alreadySuccess.has(successKey(v.video_id, "instagram")) &&
+      !overFailCap(v.video_id, "instagram");
     const needFb =
-      fbEnabled && !alreadySuccess.has(successKey(v.video_id, "facebook"));
+      fbEnabled &&
+      !alreadySuccess.has(successKey(v.video_id, "facebook")) &&
+      !overFailCap(v.video_id, "facebook");
     const needTh =
-      thEnabled && !alreadySuccess.has(successKey(v.video_id, "threads"));
+      thEnabled &&
+      !alreadySuccess.has(successKey(v.video_id, "threads")) &&
+      !overFailCap(v.video_id, "threads");
     return needIg || needFb || needTh;
   });
 
@@ -534,14 +586,22 @@ export async function runPublishMetaStep(): Promise<PublishMetaResult> {
     );
 
     const needIg =
-      igEnabled && !alreadySuccess.has(successKey(video.video_id, "instagram"));
+      igEnabled &&
+      !alreadySuccess.has(successKey(video.video_id, "instagram")) &&
+      !overFailCap(video.video_id, "instagram");
     const needFb =
-      fbEnabled && !alreadySuccess.has(successKey(video.video_id, "facebook"));
+      fbEnabled &&
+      !alreadySuccess.has(successKey(video.video_id, "facebook")) &&
+      !overFailCap(video.video_id, "facebook");
     const needTh =
-      thEnabled && !alreadySuccess.has(successKey(video.video_id, "threads"));
+      thEnabled &&
+      !alreadySuccess.has(successKey(video.video_id, "threads")) &&
+      !overFailCap(video.video_id, "threads");
 
     if (!needIg && !needFb && !needTh) {
-      console.log(`[publish-meta] ⏭  이미 발행 완료된 영상 → 스킵`);
+      console.log(
+        `[publish-meta] ⏭  이미 발행 완료/실패한도 도달 영상 → 스킵`,
+      );
       if (igEnabled) result.instagram_skipped_count += 1;
       if (fbEnabled) result.facebook_skipped_count += 1;
       if (thEnabled) result.threads_skipped_count += 1;
