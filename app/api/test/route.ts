@@ -62,6 +62,25 @@ const CLAUDE_MODEL = "claude-sonnet-4-6";
 export async function GET(request?: NextRequest) {
   // M-5: env 변수 설정/누락 상세는 인증된 호출에만 노출(공격표면 열거 방지).
   const authorized = isPipelineRequestAuthorized(request);
+
+  // COST-2 / LEAK-2 / AUTHZ-3: 무인증 HTTP 호출은 유료·외부 프로브(Claude messages.create,
+  // YouTube list, Gmail SMTP verify, Supabase count)를 일절 실행하지 않는다. 과거에는 익명
+  // 호출 한 번마다 실제 Claude 비용 + YouTube 쿼터 + Gmail 인증이 돌아 비용 어뷰징/의존성
+  // liveness 오라클 표면이 됐다. 또한 env 누락 개수·업스트림 에러메시지·서비스 연결상태를
+  // 무인증자에게 노출하지 않는다. 단, 운영자의 배포/롤백 감지를 위해 commit SHA 만 가벼운
+  // liveness 로 남긴다(?secret= 없이도 배포 확인 가능). 전체 진단은 Bearer CRON_SECRET 또는
+  // ?secret=<CRON_SECRET> 로 호출.
+  if (!authorized) {
+    return NextResponse.json({
+      timestamp: new Date().toISOString(),
+      commit: process.env.VERCEL_GIT_COMMIT_SHA ?? "unknown",
+      authorized: false,
+      overall_status: "unknown",
+      message:
+        "전체 진단은 인증된 호출에서만 제공됩니다. Authorization: Bearer <CRON_SECRET> 또는 ?secret=<CRON_SECRET> 를 사용하세요.",
+    });
+  }
+
   const envDetails: EnvVarDetails = {
     YOUTUBE_API_KEY: getEnvStatus("YOUTUBE_API_KEY"),
     YOUTUBE_CHANNEL_ID: getEnvStatus("YOUTUBE_CHANNEL_ID"),

@@ -1,6 +1,7 @@
 import { createAdminClient } from "@/lib/storage";
 import { recencyCutoffIso } from "@/lib/video-recency";
 import { sendPipelineHealthAlert } from "@/lib/mailer";
+import { envInt } from "@/lib/env";
 
 /**
  * ============================================================
@@ -27,16 +28,18 @@ import { sendPipelineHealthAlert } from "@/lib/mailer";
  */
 
 const ALERT_TYPE_HEALTH = "pipeline_health";
-const ALERT_COOLDOWN_HOURS = 12;
 
+// 임계값은 env 로 튜닝 가능(미설정 시 기존 값 그대로 — 동작 불변). 코드 재배포 없이
+// Vercel 대시보드에서 조정하기 위함. 다른 튜너블(DETECT_MAX_AGE_DAYS 등)과 동일 패턴.
+const ALERT_COOLDOWN_HOURS = envInt("HEALTH_COOLDOWN_HOURS", 12);
 /** pending 이 이 시간보다 오래 멈춰 있으면 발행이 중간에 깨진 것으로 본다. */
-const STUCK_PENDING_HOURS = 2;
+const STUCK_PENDING_HOURS = envInt("HEALTH_STUCK_PENDING_HOURS", 2);
 /** 다운로드 대기가 이 시간을 넘으면 로컬 워커·Drive 둘 다 실패한 것으로 본다. */
-const UNDOWNLOADED_STALE_HOURS = 36;
+const UNDOWNLOADED_STALE_HOURS = envInt("HEALTH_UNDOWNLOADED_STALE_HOURS", 36);
 /** 최근 24h non-cafe 발행 실패가 이 수 이상이면 광범위 장애로 본다. */
-const FAILURE_SURGE_THRESHOLD = 5;
+const FAILURE_SURGE_THRESHOLD = envInt("HEALTH_FAILURE_SURGE_THRESHOLD", 5);
 /** Meta 토큰 만료가 이 일수 이내면 사전 경고. */
-const TOKEN_EXPIRY_WARN_DAYS = 7;
+const TOKEN_EXPIRY_WARN_DAYS = envInt("HEALTH_TOKEN_EXPIRY_WARN_DAYS", 7);
 
 export interface HealthAnomaly {
   key: string;

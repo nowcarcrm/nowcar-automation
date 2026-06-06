@@ -13,6 +13,7 @@ import { ensureMetaTokenLoaded } from "@/lib/meta-token";
 import { localWorkerGraceCutoffIso } from "@/lib/download-grace";
 import { runPipelineHealthCheck } from "@/lib/pipeline-health";
 import { recencyCutoffIso } from "@/lib/video-recency";
+import { timingSafeStrEqual } from "@/lib/cron-auth";
 
 /**
  * ============================================================
@@ -96,12 +97,12 @@ function verifyAuth(req: NextRequest): { ok: boolean; reason?: string } {
   }
 
   const authHeader = req.headers.get("authorization") ?? "";
-  if (authHeader === `Bearer ${secret}`) {
+  if (timingSafeStrEqual(authHeader, `Bearer ${secret}`)) {
     return { ok: true };
   }
 
   const querySecret = req.nextUrl.searchParams.get("secret");
-  if (querySecret && querySecret === secret) {
+  if (querySecret && timingSafeStrEqual(querySecret, secret)) {
     return { ok: true };
   }
 

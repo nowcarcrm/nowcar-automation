@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createAdminClient, deleteExpiredVideos } from "@/lib/storage";
+import { timingSafeStrEqual } from "@/lib/cron-auth";
 
 /**
  * ============================================================
@@ -60,13 +61,13 @@ function verifyAuth(req: NextRequest): {
 
   // Vercel Cron 은 Authorization: Bearer <CRON_SECRET> 을 자동 첨부한다.
   const authHeader = req.headers.get("authorization") ?? "";
-  if (authHeader === `Bearer ${secret}`) {
+  if (timingSafeStrEqual(authHeader, `Bearer ${secret}`)) {
     return { ok: true };
   }
 
   // 수동 테스트용 - ?secret=... 쿼리로도 허용 (대표님 편의)
   const querySecret = req.nextUrl.searchParams.get("secret");
-  if (querySecret && querySecret === secret) {
+  if (querySecret && timingSafeStrEqual(querySecret, secret)) {
     return { ok: true };
   }
 
