@@ -84,23 +84,42 @@ function stringifyField(value: unknown): string | null {
 }
 
 function normalizeNaverError(rawBody: string, status: number): string {
+  // LEAK-1 + 카페 999 서킷 브레이커 양립.
+  //   - 누출 차단: 원시 응답 body 전체를 사용자 노출 메시지에 덤프하지 않는다
+  //     (구조화 필드만, 200자 cap). 전체 rawBody 는 NaverApiError.rawBody 로 보존돼
+  //     콘솔/DB 진단엔 그대로 쓸 수 있다. 이 message 는 pipeline errors[] → (현재 무인증)
+  //     pipeline/run 응답 + 운영자 메일로 흘러가므로 원시 바디 유출 경로를 막는다.
+  //   - 999 보존(필수): 이 반환값은 NaverApiError.message → publish-naver-cafe 의
+  //     isNaverCafe999Error 입력이 되어 인-사이클 break + 크로스-사이클 backoff(서킷
+  //     브레이커)를 구동한다. 999 토큰을 떨어뜨리면 차단된 네이버 계정을 계속 두드리는
+  //     스톰이 난다(브레이커가 막으려던 바로 그 상황). 그래서 code 필드까지 errorCode 로
+  //     끌어올리고, 마지막에 안전장치로 999 를 명시 복원한다.
+  let message: string;
   try {
     const parsed = JSON.parse(rawBody) as Record<string, unknown> | null;
     const extractedMessage =
       stringifyField(parsed?.errorMessage) ||
       stringifyField(parsed?.error_description) ||
       stringifyField(parsed?.message) ||
+      stringifyField(parsed?.msg) ||
       stringifyField(parsed?.error) ||
-      (parsed ? JSON.stringify(parsed) : rawBody);
+      "(구조화된 오류 메시지 없음)";
     const errorCode =
       stringifyField(parsed?.errorCode) ||
       stringifyField(parsed?.error_code) ||
+      stringifyField(parsed?.code) ||
       "";
     const codeStr = errorCode ? ` [errorCode=${errorCode}]` : "";
-    return `Naver API 오류(HTTP ${status})${codeStr}: ${extractedMessage}`;
+    message = `Naver API 오류(HTTP ${status})${codeStr}: ${extractedMessage.slice(0, 200)}`;
   } catch {
-    return `Naver API 오류(HTTP ${status}): ${rawBody}`;
+    message = `Naver API 오류(HTTP ${status}): (응답 본문 비표준 — 상세는 서버 로그 참조)`;
   }
+  // 안전장치: 위 정규화가 어떤 body 형태에서든 999 토큰을 떨어뜨렸다면 명시 복원한다
+  // (원시 body 노출 없이 차단 신호만). BLOCK_PATTERNS(/\b999\b/, lib/naver-cafe-block.ts)와 일치 유지.
+  if (/\b999\b/.test(rawBody) && !/\b999\b/.test(message)) {
+    message += " [code=999]";
+  }
+  return message;
 }
 
 export async function callNaverApi<T>(params: {
