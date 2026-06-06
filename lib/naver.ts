@@ -184,6 +184,9 @@ export async function callNaverApi<T>(params: {
     };
   }
 
+  // RESIL-1: 외부 fetch 타임아웃(30s). 초과 시 throw → publish-naver-cafe 가 실패 처리
+  // (행난 소켓이 파이프라인 예산을 잡아먹는 것 방지).
+  init.signal = AbortSignal.timeout(30_000);
   const response = await fetch(params.endpoint, init);
   const raw = await response.text();
 
@@ -227,6 +230,8 @@ export async function refreshNaverAccessToken(): Promise<string> {
       client_secret: clientSecret,
       refresh_token: refreshToken,
     }).toString(),
+    // RESIL-1: 외부 fetch 타임아웃(20s).
+    signal: AbortSignal.timeout(20_000),
   });
 
   const raw = await response.text();
