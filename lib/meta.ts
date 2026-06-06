@@ -552,6 +552,8 @@ async function uploadFacebookReelsByFileUrl(
       authorization: `OAuth ${pageAccessToken}`,
       file_url: fileUrl,
     },
+    // RESIL-1: file_url rupload 타임아웃(60s). 행난 소켓이 발행 예산을 잡아먹지 않게.
+    signal: AbortSignal.timeout(60_000),
   });
 
   const raw = await response.text();
@@ -572,7 +574,10 @@ async function uploadFacebookReelsByBinaryFallback(
   // fallback 경로: file_url 업로드가 거부될 때만 서버에서 파일을 읽어 바이너리 업로드
   console.log(`[meta] ⬆️ [fb-reels:2-upload-binary] fallback 시작`);
 
-  const sourceResponse = await fetch(fileUrl);
+  // RESIL-1: 소스 mp4 다운로드 타임아웃(120s, ~25MB 쇼츠에 충분한 여유).
+  const sourceResponse = await fetch(fileUrl, {
+    signal: AbortSignal.timeout(120_000),
+  });
   if (!sourceResponse.ok) {
     throw new Error(
       `[fb-reels:2-upload-binary] 소스 파일 다운로드 실패: HTTP ${sourceResponse.status}`,
@@ -589,6 +594,8 @@ async function uploadFacebookReelsByBinaryFallback(
       "Content-Type": "application/octet-stream",
     },
     body: buffer,
+    // RESIL-1: 바이너리 업로드 타임아웃(120s). 초과 시 이 영상 FB 발행만 실패(재시도).
+    signal: AbortSignal.timeout(120_000),
   });
 
   const raw = await uploadResponse.text();

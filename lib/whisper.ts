@@ -30,6 +30,9 @@ async function callWhisperApi(file: Blob, filename: string): Promise<string> {
       Authorization: `Bearer ${apiKey}`,
     },
     body: form,
+    // RESIL-1: 외부 fetch 타임아웃(120s). 행난 소켓이 300s 파이프라인 예산을 통째로
+    // 잡아먹어 발행 전체를 멈추는 것을 막는다. 초과 시 이 영상 STT 만 실패(재시도 대상).
+    signal: AbortSignal.timeout(120_000),
   });
 
   if (!response.ok) {

@@ -133,7 +133,11 @@ async function getTokenType(
     );
     url.searchParams.set("input_token", inputToken);
     url.searchParams.set("access_token", `${appId}|${appSecret}`);
-    const resp = await fetch(url.toString(), { method: "GET" });
+    // RESIL-1: 외부 fetch 타임아웃(15s). 초과 시 catch → null 반환(토큰 타입 확인 skip).
+    const resp = await fetch(url.toString(), {
+      method: "GET",
+      signal: AbortSignal.timeout(15_000),
+    });
     if (!resp.ok) return null;
     const body = (await resp.json()) as {
       data?: { type?: string; is_valid?: boolean };
@@ -171,7 +175,11 @@ async function exchangeForLongLivedToken(
   url.searchParams.set("client_secret", appSecret);
   url.searchParams.set("fb_exchange_token", currentToken);
 
-  const resp = await fetch(url.toString(), { method: "GET" });
+  // RESIL-1: 외부 fetch 타임아웃(15s). 초과 시 throw → 호출자(cron)가 env 토큰으로 폴백.
+  const resp = await fetch(url.toString(), {
+    method: "GET",
+    signal: AbortSignal.timeout(15_000),
+  });
   const raw = await resp.text();
 
   if (!resp.ok) {
