@@ -249,14 +249,21 @@ async function resetStaleAttempts(): Promise<number> {
  * 짧은 AbortSignal 로 클라이언트 fetch 만 끊고 빠진다 — Vercel 측 함수는
  * 요청을 이미 받아 실행 중이므로 파이프라인은 끝까지 돈다.
  */
-async function triggerPipeline(req: NextRequest): Promise<void> {
-  const host = process.env.VERCEL_URL ?? req.headers.get("host");
+async function triggerPipeline(): Promise<void> {
+  // SSRF 하드닝: 인바운드 Host 헤더를 신뢰해 self-trigger 대상 호스트를 만들지 않는다.
+  // 운영자 지정 PIPELINE_SELF_HOST → Vercel 주입 VERCEL_URL 순. 둘 다 없으면 스킵한다
+  // (Vercel 런타임엔 VERCEL_URL 이 항상 존재하므로 운영 동작은 불변).
+  const host = process.env.PIPELINE_SELF_HOST ?? process.env.VERCEL_URL;
   if (!host) {
-    console.warn("[cron/download] ⚠️ 파이프라인 트리거 스킵: host 정보 없음");
+    console.warn("[cron/download] ⚠️ 파이프라인 트리거 스킵: self host(env) 없음");
     return;
   }
-  const protocol = process.env.VERCEL_URL ? "https" : "http";
-  const url = `${protocol}://${host}/api/pipeline/run`;
+  // pipeline/run 인증(C-1) 사전 준비(시퀀싱 2단계): 내부 self-trigger 도 CRON_SECRET 을
+  // 실어 보낸다. 지금은 pipeline/run 이 무인증이라 무해하지만, 추후 인증 가드를 켜도 이
+  // 내부 트리거가 401 로 끊기지 않게 한다. secret 은 Vercel 자체 egress 안에서만 오간다.
+  // (3단계=pipeline/run 인증 가드는 cron-job.org 에 ?secret= 추가 확인 후 별도 배포.)
+  const secret = process.env.CRON_SECRET;
+  const url = `https://${host}/api/pipeline/run${secret ? `?secret=${encodeURIComponent(secret)}` : ""}`;
 
   try {
     const res = await fetch(url, {
@@ -398,7 +405,7 @@ async function handleDownload(req: NextRequest): Promise<NextResponse> {
     };
     // 다운로드할 게 없어도 파이프라인은 돌려야 한다.
     // 어제 다운로드 완료된 영상의 IG/FB/카페/메일 발행이 아직 남아 있을 수 있음.
-    after(() => triggerPipeline(req));
+    after(() => triggerPipeline());
     return NextResponse.json(responseBody);
   }
 
@@ -484,7 +491,7 @@ async function handleDownload(req: NextRequest): Promise<NextResponse> {
   };
 
   // 응답 송신 후 파이프라인 발행 단계 트리거.
-  after(() => triggerPipeline(req));
+  after(() => triggerPipeline());
   return NextResponse.json(responseBody);
 }
 
